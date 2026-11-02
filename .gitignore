@@ -40,6 +40,8 @@ mlruns/
 # Datasets - don't commit large data
 datasets/raw/
 datasets/processed/
+datasets/annotations/yolo/images/
+datasets/annotations/yolo/labels/
 
 # Model checkpoints
 models/classification/*.pt
