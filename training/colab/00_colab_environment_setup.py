@@ -184,40 +184,82 @@ for item in os.listdir(DRIVE_PROJECT_DIR):
     print(f"  {item}/")
 
 # %% [markdown]
-# ## Step 5: Configure Hugging Face Authentication
+# ## Step 5: Configure and Verify Hugging Face Write/Upload Access
 # 
-# **Why Hugging Face Hub?**
+# **Why test an actual upload?**
+# `whoami()` only proves your token is valid for reading user metadata. It does
+# NOT prove you have write/upload permissions to create repositories or push model weights.
 # 
-# After training a model, we need to store it somewhere accessible.
-# Hugging Face Hub provides:
-# - Free model hosting
-# - Versioning
-# - Model cards (documentation)
-# - Easy download from any environment
-# 
-# **Security:**
-# - Your HF token is stored in Colab Secrets (not in the notebook)
-# - Go to the key icon (🔑) in the left sidebar → Add Secret
-# - Name: `HF_TOKEN`, Value: your Hugging Face write token
-# - Get a token from: https://huggingface.co/settings/tokens
-# 
-# **Never paste your token directly in a notebook cell.**
+# **What this cell does:**
+# 1. Logs in via token retrieved securely from Colab Secrets (`HF_TOKEN`).
+# 2. Queries user identity (`whoami()`).
+# 3. Creates a temporary private repository: `<username>/inspection-upload-smoke-test`.
+# 4. Uploads a small test artifact (`test_artifact.json`).
+# 5. Verifies the file exists in the repo and can be downloaded.
+# 6. Deletes the temporary test repository to keep your account clean.
+# 7. Confirms end-to-end write permissions.
 
 # %%
-from huggingface_hub import login
+import json
+import time
+from huggingface_hub import HfApi, login, hf_hub_download
 
 try:
-    # Try Colab Secrets first (recommended)
     from google.colab import userdata
     hf_token = userdata.get("HF_TOKEN")
     login(token=hf_token)
-    print("Logged in to Hugging Face via Colab Secrets.")
-except Exception:
-    print("Could not retrieve HF_TOKEN from Colab Secrets.")
-    print("Please add it: click 🔑 in the sidebar → Add Secret")
-    print("Name: HF_TOKEN, Value: your Hugging Face write token")
-    print("")
-    print("Alternatively, run: huggingface_hub.login()")
+    api = HfApi(token=hf_token)
+    user_info = api.whoami()
+    username = user_info["name"]
+    print(f"[OK] Authenticated as Hugging Face user: {username}")
+    
+    # Run End-to-End Write & Upload Verification
+    test_repo_id = f"{username}/inspection-upload-smoke-test"
+    print(f"\n[Test] Creating temporary private repository: {test_repo_id}")
+    api.create_repo(repo_id=test_repo_id, repo_type="model", private=True, exist_ok=True)
+    
+    # Create a small test artifact
+    test_payload = {
+        "project": "Industrial Damage Detection",
+        "verification": "HF Hub Upload Verification",
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "status": "ready_for_training"
+    }
+    test_file_path = "/content/smoke_test.json"
+    with open(test_file_path, "w") as f:
+        json.dump(test_payload, f, indent=2)
+        
+    print(f"[Test] Uploading test artifact: {test_file_path} -> {test_repo_id}")
+    api.upload_file(
+        path_or_fileobj=test_file_path,
+        path_in_repo="smoke_test.json",
+        repo_id=test_repo_id,
+        repo_type="model",
+        commit_message="test: verify write upload permissions"
+    )
+    
+    # Download back and verify
+    print("[Test] Verifying download of uploaded artifact...")
+    downloaded = hf_hub_download(repo_id=test_repo_id, filename="smoke_test.json", repo_type="model")
+    with open(downloaded, "r") as f:
+        verified_data = json.load(f)
+    assert verified_data["verification"] == test_payload["verification"]
+    print("  ✓ Artifact verified successfully on Hugging Face Hub.")
+    
+    # Clean up temporary test repository
+    print(f"[Test] Cleaning up temporary repository: {test_repo_id}")
+    api.delete_repo(repo_id=test_repo_id, repo_type="model")
+    print("\n✓ SUCCESS: Hugging Face write and upload permissions are fully verified.")
+    
+except Exception as e:
+    print("\n" + "!" * 60)
+    print("HUGGING FACE VERIFICATION FAILED:")
+    print(e)
+    print("Ensure you have created a token with WRITE role at:")
+    print("https://huggingface.co/settings/tokens")
+    print("and saved it under Colab Secrets (key icon on left) with name 'HF_TOKEN'.")
+    print("!" * 60)
+    raise
 
 # %% [markdown]
 # ## Step 6: GPU Stress Test
