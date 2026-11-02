@@ -70,3 +70,4 @@ Third-party mirrors (such as Hugging Face community datasets or Kaggle uploads) 
 - **Creators:** Northeastern University (Shenyang, China)
 - **Role:** Supervised 6-class surface defect classification (used in Phase 4).
 - **Structure:** 1,800 grayscale surface images across 6 classes (crazing, inclusion, patches, pitted surface, rolled-in scale, scratches).
+
