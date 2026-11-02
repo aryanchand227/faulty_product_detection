@@ -66,8 +66,8 @@ class NEUConfig:
         "crazing", "inclusion", "patches",
         "pitted_surface", "rolled-in_scale", "scratches"
     )
-    image_size: int = 224  # Standard for classification
-    images_per_class: int = 300
+    image_size: int = 224  # Standard input resolution for classification
+    total_images: int = 1797  # Empirically verified audit count (1797 images & XMLs)
     
     # Normalization (ImageNet statistics)
     mean: tuple = (0.485, 0.456, 0.406)

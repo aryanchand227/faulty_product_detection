@@ -67,7 +67,34 @@ Third-party mirrors (such as Hugging Face community datasets or Kaggle uploads) 
 - **Role:** Cross-category anomaly generalization testing (used in later stretch phases).
 
 ### 2.2 NEU Surface Defect Database
-- **Creators:** Northeastern University (Shenyang, China)
-- **Role:** Supervised 6-class surface defect classification (used in Phase 4).
-- **Structure:** 1,800 grayscale surface images across 6 classes (crazing, inclusion, patches, pitted surface, rolled-in scale, scratches).
+- **Creators:** Northeastern University (Shenyang, China) — Song & Yan (2013).
+- **Role:** Supervised 6-class surface defect classification (Phase 4) and object detection (Phase 5).
+- **Verified Sample Count:** Exactly **1,797 defect images** and **1,797 Pascal VOC XML files** (4,177 valid bounding boxes total).
+- **Resolution:** Uniform $200 \times 200$ pixels.
+- **Classes:** `crazing` (688 boxes), `inclusion` (1,010 boxes), `patches` (875 boxes), `pitted_surface` (430 boxes), `rolled-in_scale` (628 boxes), `scratches` (546 boxes).
+- **Split Distribution:** Official ImageSets partition:
+  - Train: 1,437 images
+  - Val: 180 images
+  - Test: 180 images
+  - Overlap between splits: **0 (Strictly mutually exclusive image IDs)**.
+
+#### Critical Engineering Limitation: Physical Specimen Independence
+The NEU database provides image-level identifiers (`crazing_1.jpg`, `crazing_2.jpg`, etc.) but does **not** provide physical specimen or steel slab metadata.
+If multiple image crops originated from the same physical hot-rolled steel strip, image-level splitting could place visually correlated crops into both the training and test sets.
+In an industrial production deployment, data must be partitioned strictly by **heat/batch/coil ID** rather than random image crops to ensure genuine generalization across distinct production runs.
+
+---
+
+## 3. Cross-Domain Operational Reality (Bottles vs Steel Surfaces)
+
+> [!WARNING]
+> **Domain Shift Warning:**
+> Our project investigates two distinct industrial manufacturing benchmarks:
+> 1. **MVTec AD Bottle:** Transparent/translucent cylindrical glass containers with smooth contours.
+> 2. **NEU Steel Strip:** Opaque, highly textured planar hot-rolled metal sheets.
+>
+> A model trained on normal glass bottle surfaces **cannot** be used to inspect steel strips, and vice versa.
+> In our software architecture ([`src/config.py`](file:///d:/CSE_471/industrial-damage-detection/src/config.py) and FastAPI backend), inspection pipelines are strictly partitioned by `product_type`:
+> - `product_type="bottle"`: Routes to MVTec-trained models (PatchCore Anomaly Detection + U-Net defect segmentation).
+> - `product_type="steel_strip"`: Routes to NEU-trained models (Supervised Multi-Class Classifier + YOLO Object Detection).
 
