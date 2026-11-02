@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+eggs/
+*.egg
+.Python
+env/
+venv/
+.venv/
+
+# Virtual environments
+.env
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_metadata/
+
+# ML artifacts
+*.pt
+*.pth
+*.onnx
+*.trt
+*.engine
+wandb/
+mlruns/
+
+# Datasets - don't commit large data
+datasets/raw/
+datasets/processed/
+
+# Model checkpoints
+models/classification/*.pt
+models/classification/*.pth
+models/detection/*.pt
+models/detection/*.pth
+models/segmentation/*.pt
+models/segmentation/*.pth
+models/anomaly/*.pt
+models/anomaly/*.pth
+models/anomaly/*.pkl
+models/optimized/
+
+# Docker
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Node/React
+node_modules/
+frontend/build/
+frontend/dist/
+frontend/.env
+
+# Secrets
+*.pem
+*.key
+secrets/
