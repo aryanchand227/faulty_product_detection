@@ -163,3 +163,4 @@ class CombinedBCEDiceLoss(nn.Module):
         dice = self.dice_loss(probs, targets)
 
         return (self.bce_weight * bce) + (self.dice_weight * dice)
+

@@ -109,14 +109,19 @@ assert len(test_imgs) == 180, f"Expected 180 test images, found {len(test_imgs)}
 print("[Dataset] Partition integrity verified. Zero split leakage.")
 
 # =====================================================================
-# 4. YOLOv8 Training Run
+# 4. YOLOv8 Training Run (STAGE 1: Tuning on Train/Val, Test Sealed)
 # =====================================================================
 print("\n" + "=" * 70)
-print("TRAINING YOLOv8 NANO (yolov8n.pt)")
+print("STAGE 1: MODEL TRAINING & VALIDATION SELECTION (TEST SET SEALED)")
 print("=" * 70)
 
 PROJECT_DIR = Path("experiments/detection/yolo")
-RUN_NAME = "neu_yolov8n_colab"
+RUN_NAME = "neu_yolov8n_colab_224"
+
+# We select imgsz=224 to align with native 200x200 sensor resolution (closest multiple of 32).
+# Avoids 8.16x unnecessary compute inflation of 640x640 on native 200x200 images.
+TRAIN_IMGSZ = int(os.environ.get("YOLO_IMGSZ", 224))
+print(f"[Training] Target Resolution: {TRAIN_IMGSZ}x{TRAIN_IMGSZ}")
 
 model = YOLO("yolov8n.pt")
 
@@ -124,7 +129,7 @@ start_train = time.time()
 train_results = model.train(
     data=str(DATA_YAML),
     epochs=50,
-    imgsz=640,
+    imgsz=TRAIN_IMGSZ,
     batch=16,
     device=0,
     project=str(PROJECT_DIR),
@@ -142,10 +147,10 @@ train_duration = time.time() - start_train
 print(f"\n[Training] Completed in {train_duration / 60:.2f} minutes.")
 
 # =====================================================================
-# 5. Validation and Test Set Evaluation
+# 5. Model Selection (Validation Set Only)
 # =====================================================================
 print("\n" + "=" * 70)
-print("MODEL EVALUATION: VALIDATION & TEST SETS")
+print("STAGE 1B: VALIDATION PERFORMANCE EVALUATION (MODEL SELECTION)")
 print("=" * 70)
 
 best_weights_path = PROJECT_DIR / RUN_NAME / "weights" / "best.pt"
@@ -154,9 +159,7 @@ if not best_weights_path.exists():
 
 best_model = YOLO(str(best_weights_path))
 
-# Validation evaluation
-print("\n--- Validation Partition Evaluation ---")
-val_results = best_model.val(data=str(DATA_YAML), split="val", imgsz=640, device=0)
+val_results = best_model.val(data=str(DATA_YAML), split="val", imgsz=TRAIN_IMGSZ, device=0)
 val_metrics = {
     "mAP50": float(val_results.box.map50),
     "mAP50_95": float(val_results.box.map),
@@ -168,9 +171,14 @@ print(f"Validation mAP@50:95 : {val_metrics['mAP50_95']:.4f}")
 print(f"Validation Precision : {val_metrics['precision']:.4f}")
 print(f"Validation Recall    : {val_metrics['recall']:.4f}")
 
-# Hold-out test evaluation
-print("\n--- Test Partition Evaluation ---")
-test_results = best_model.val(data=str(DATA_YAML), split="test", imgsz=640, device=0)
+# =====================================================================
+# 6. Final Independent Model Audit (STAGE 2: Test Set Evaluated ONCE)
+# =====================================================================
+print("\n" + "=" * 70)
+print("STAGE 2: FINAL INDEPENDENT AUDIT (TEST SET EVALUATED ONCE)")
+print("=" * 70)
+
+test_results = best_model.val(data=str(DATA_YAML), split="test", imgsz=TRAIN_IMGSZ, device=0)
 test_metrics = {
     "mAP50": float(test_results.box.map50),
     "mAP50_95": float(test_results.box.map),
@@ -178,6 +186,9 @@ test_metrics = {
     "recall": float(test_results.box.mr)
 }
 print(f"Test mAP@50          : {test_metrics['mAP50']:.4f}")
+print(f"Test mAP@50:95       : {test_metrics['mAP50_95']:.4f}")
+print(f"Test Precision       : {test_metrics['precision']:.4f}")
+print(f"Test Recall          : {test_metrics['recall']:.4f}")
 print(f"Test mAP@50:95       : {test_metrics['mAP50_95']:.4f}")
 print(f"Test Precision       : {test_metrics['precision']:.4f}")
 print(f"Test Recall          : {test_metrics['recall']:.4f}")
@@ -351,3 +362,4 @@ else:
 print("\n" + "=" * 70)
 print("PHASE 5 COLAB RUN FINISHED SUCCESSFULLY!")
 print("=" * 70)
+

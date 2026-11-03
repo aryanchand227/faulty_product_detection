@@ -17,7 +17,7 @@ import json
 import logging
 from pathlib import Path
 import time
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from ultralytics import YOLO
 
@@ -170,12 +170,63 @@ def train_yolo_detector(
     return summary
 
 
+def run_resolution_comparison(
+    data_yaml: Union[str, Path] = "datasets/annotations/yolo/data.yaml",
+    model_variant: str = "yolov8n.pt",
+    resolutions: List[int] = [224, 320, 640],
+    epochs: int = 25,
+    batch_size: int = 16,
+    device: str = "cpu",
+    project: Union[str, Path] = "experiments/detection/yolo/resolution_study"
+) -> Dict[str, Any]:
+    """
+    Executes a controlled comparative benchmark across multiple input resolutions (e.g. 224, 320, 640).
+
+    Investigates the trade-off between:
+    - Native sensor resolution (NEU is 200x200; 224 is closest multiple of 32)
+    - FLOPs & inference latency (FPS)
+    - Small defect localization precision (mAP@50 and mAP@50:95)
+    """
+    benchmark_results: Dict[str, Any] = {}
+
+    for res in resolutions:
+        run_name = f"res_{res}x{res}"
+        logger.info(f"\n{'=' * 60}\nRunning Resolution Benchmark: {res}x{res}\n{'=' * 60}")
+
+        summary = train_yolo_detector(
+            data_yaml=data_yaml,
+            model_variant=model_variant,
+            epochs=epochs,
+            imgsz=res,
+            batch_size=batch_size,
+            device=device,
+            project=project,
+            name=run_name,
+            patience=10,
+            run_test_eval=False # Strictly keep test set sealed during resolution tuning!
+        )
+
+        benchmark_results[f"{res}x{res}"] = {
+            "resolution": res,
+            "training_time_sec": summary["training_time_seconds"],
+            "val_metrics": summary["val_metrics"],
+            "best_weights": summary["best_weights"]
+        }
+
+    out_file = Path(project) / "resolution_study_summary.json"
+    with open(out_file, "w", encoding="utf-8") as f:
+        json.dump(benchmark_results, f, indent=2)
+
+    logger.info(f"Saved multi-resolution benchmark study to: {out_file}")
+    return benchmark_results
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train YOLO detector on industrial surface defects.")
     parser.add_argument("--data", type=str, default="datasets/annotations/yolo/data.yaml", help="Path to data.yaml")
     parser.add_argument("--model", type=str, default="yolov8n.pt", help="Pretrained YOLO model (yolov8n.pt, etc.)")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
-    parser.add_argument("--imgsz", type=int, default=640, help="Input image dimension")
+    parser.add_argument("--imgsz", type=int, default=224, help="Input image dimension (224 close to native 200x200, 320, 640)")
     parser.add_argument("--batch", type=int, default=16, help="Batch size")
     parser.add_argument("--device", type=str, default="cpu", help="Target device (cpu, 0, cuda)")
     parser.add_argument("--project", type=str, default="experiments/detection/yolo", help="Project output folder")
@@ -183,21 +234,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=15, help="Early stopping patience")
     parser.add_argument("--optimizer", type=str, default="AdamW", help="Optimizer (AdamW, SGD)")
     parser.add_argument("--lr", type=float, default=0.001, help="Initial learning rate")
+    parser.add_argument("--run-benchmark", action="store_true", help="Run multi-resolution comparison study (224, 320, 640)")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    train_yolo_detector(
-        data_yaml=args.data,
-        model_variant=args.model,
-        epochs=args.epochs,
-        imgsz=args.imgsz,
-        batch_size=args.batch,
-        device=args.device,
-        project=args.project,
-        name=args.name,
-        patience=args.patience,
-        optimizer=args.optimizer,
-        lr0=args.lr
-    )
+    if args.run_benchmark:
+        run_resolution_comparison(
+            data_yaml=args.data,
+            model_variant=args.model,
+            resolutions=[224, 320, 640],
+            epochs=args.epochs,
+            batch_size=args.batch,
+            device=args.device
+        )
+    else:
+        train_yolo_detector(
+            data_yaml=args.data,
+            model_variant=args.model,
+            epochs=args.epochs,
+            imgsz=args.imgsz,
+            batch_size=args.batch,
+            device=args.device,
+            project=args.project,
+            name=args.name,
+            patience=args.patience,
+            optimizer=args.optimizer,
+            lr0=args.lr
+        )
+

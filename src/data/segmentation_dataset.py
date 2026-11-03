@@ -177,3 +177,4 @@ def build_mvtec_segmentation_splits(
     )
 
     return train_samples, val_samples, test_samples
+

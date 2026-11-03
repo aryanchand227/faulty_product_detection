@@ -227,3 +227,4 @@ class UNetSegmenter:
             cv2.drawContours(annotated, contours, -1, color, thickness=2, lineType=cv2.LINE_AA)
 
         return annotated
+

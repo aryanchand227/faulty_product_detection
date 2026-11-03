@@ -199,3 +199,4 @@ class UNet(nn.Module):
     def count_parameters(self) -> int:
         """Returns total number of trainable model parameters."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
+

@@ -202,3 +202,4 @@ class SegmentationTrainer:
             "best_checkpoint": str(self.best_checkpoint_path),
             "history": self.history
         }
+

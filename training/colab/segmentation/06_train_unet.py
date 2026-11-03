@@ -131,10 +131,10 @@ test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False, num_workers=
 print(f"[Dataset] Train batches: {len(train_loader)} | Val batches: {len(val_loader)} | Test batches: {len(test_loader)}")
 
 # =====================================================================
-# 4. Model Instantiation & Training
+# 4. Model Training & Validation Checkpoint Selection (STAGE 1)
 # =====================================================================
 print("\n" + "=" * 70)
-print("TRAINING U-NET ARCHITECTURE")
+print("STAGE 1: U-NET TRAINING & VALIDATION SELECTION (TEST SET SEALED)")
 print("=" * 70)
 
 OUTPUT_DIR = Path("experiments/segmentation/unet")
@@ -165,10 +165,10 @@ train_summary = trainer.train(num_epochs=30)
 best_checkpoint = Path(train_summary["best_checkpoint"])
 
 # =====================================================================
-# 5. Hold-Out Test Split Evaluation
+# 5. Final Independent Model Audit (STAGE 2: Test Set Evaluated ONCE)
 # =====================================================================
 print("\n" + "=" * 70)
-print("HOLD-OUT TEST EVALUATION")
+print("STAGE 2: FINAL INDEPENDENT AUDIT (TEST SET EVALUATED ONCE)")
 print("=" * 70)
 
 # Load best checkpoint
@@ -320,3 +320,4 @@ PyTorch U-Net architecture trained for pixel-level boundary localization on bott
 print("\n" + "=" * 70)
 print("PHASE 6 U-NET TRAINING COMPLETED SUCCESSFULLY!")
 print("=" * 70)
+

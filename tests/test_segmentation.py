@@ -168,3 +168,4 @@ def test_unet_segmenter_draw_overlay():
     assert annotated.dtype == dummy_img.dtype
     # Pixels inside the defect region should have changed color
     assert not np.array_equal(annotated[15, 15], dummy_img[15, 15])
+

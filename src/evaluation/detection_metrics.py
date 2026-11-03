@@ -3,12 +3,19 @@ Object Detection Evaluation Metrics Module.
 
 Implements from first principles:
 1. Bounding Box Intersection over Union (IoU)
-2. Non-Maximum Suppression (NMS) algorithm
-3. True Positive (TP) / False Positive (FP) matching at IoU threshold
-4. Mean Average Precision (mAP@50 and mAP@50:95)
+2. Class-Aware Non-Maximum Suppression (NMS)
+3. Greedy Bipartite Prediction-to-Ground-Truth Matching at IoU threshold:
+   - Confidence-descending priority
+   - Strict one-to-one ground truth matching (duplicates penalized as False Positives)
+   - Proper handling of classes with zero ground-truth instances
+4. All-Points Interpolated Average Precision (AP):
+   - Right-endpoint step/rectangle integration under the monotonic precision envelope
+     AP = sum_k (R_k - R_{k-1}) * P_interp(R_k)
+   - (Note: This is step/rectangle integration, NOT trapezoidal integration)
+5. Mean Average Precision (mAP@50 and COCO mAP@50:95)
 """
 
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 import numpy as np
 
 
@@ -46,32 +53,22 @@ def non_maximum_suppression(
     conf_threshold: float = 0.25
 ) -> List[int]:
     """
-    Non-Maximum Suppression (NMS) Algorithm from First Principles.
+    Class-Aware Non-Maximum Suppression (NMS) Algorithm from First Principles.
 
     Steps:
     1. Filter out candidate boxes with confidence score below conf_threshold.
-    2. Sort remaining candidate boxes in descending order of confidence score.
-    3. Greedily select the highest-scoring box and add it to the final output list.
-    4. Compute IoU between the selected box and all remaining candidate boxes of the SAME class.
-    5. Suppress (discard) any candidate box whose IoU exceeds iou_threshold.
-    6. Repeat until no candidate boxes remain.
-
-    Args:
-        boxes: List of VOC bounding boxes [(xmin, ymin, xmax, ymax), ...]
-        scores: Corresponding detection confidence scores [float, ...]
-        classes: Corresponding predicted class IDs [int, ...]
-        iou_threshold: Overlap threshold above which redundant boxes are suppressed.
-        conf_threshold: Minimum confidence score to be considered.
+    2. Group remaining candidates by class ID (class-aware).
+    3. Sort candidates within each class descending by confidence score.
+    4. Greedily select the highest-scoring box and suppress overlapping boxes (IoU > iou_threshold).
+    5. Repeat until no candidate boxes remain.
 
     Returns:
-        List[int]: Indices of surviving bounding boxes.
+        List[int]: Indices of surviving bounding boxes in original list.
     """
-    # 1. Filter by confidence threshold
     valid_indices = [i for i, s in enumerate(scores) if s >= conf_threshold]
     if not valid_indices:
         return []
 
-    # Group candidate indices by class so suppression is class-specific
     class_groups: Dict[int, List[int]] = {}
     for idx in valid_indices:
         cls_id = classes[idx]
@@ -80,8 +77,8 @@ def non_maximum_suppression(
     keep_indices: List[int] = []
 
     for cls_id, group_indices in class_groups.items():
-        # Sort by confidence score descending
-        group_indices = sorted(group_indices, key=lambda i: scores[i], reverse=True)
+        # Sort by confidence score descending, with index as secondary key for deterministic tie-breaking
+        group_indices = sorted(group_indices, key=lambda i: (scores[i], -i), reverse=True)
 
         while group_indices:
             best_idx = group_indices.pop(0)
@@ -98,15 +95,36 @@ def non_maximum_suppression(
     return sorted(keep_indices)
 
 
-def calculate_average_precision(
+def calculate_all_points_interpolated_ap(
     recalls: np.ndarray,
     precisions: np.ndarray
 ) -> float:
     """
-    Computes Average Precision (AP) from Precision-Recall curve using standard
-    all-point continuous trapezoidal integration (COCO standard):
-        AP = sum_{k} (R_{k} - R_{k-1}) * P_interp(R_{k})
+    Computes all-points interpolated Average Precision (AP) from a Precision-Recall curve.
+
+    Mathematical Formulation:
+    -------------------------
+    1. Monotonic precision envelope:
+       P_interp(r) = max_{r' >= r} P(r')
+    2. Right-endpoint rectangle / step integration (COCO benchmark standard):
+       AP = sum_{k} (R_{k} - R_{k-1}) * P_interp(R_{k})
+
+    Note on Terminology:
+    --------------------
+    This is step/rectangle integration under the interpolated precision envelope,
+    NOT trapezoidal integration. Trapezoidal integration ((P_k + P_{k-1})/2 * delta_R)
+    would erroneously underestimate the continuous step envelope.
+
+    Args:
+        recalls: 1D array of recall points in [0, 1].
+        precisions: 1D array of corresponding precision values in [0, 1].
+
+    Returns:
+        float: Calculated AP score in [0.0, 1.0].
     """
+    if len(recalls) == 0 or len(precisions) == 0:
+        return 0.0
+
     # Prepend 0 to recall and precision, append 1 to recall and 0 to precision
     mrec = np.concatenate(([0.0], recalls, [1.0]))
     mpre = np.concatenate(([0.0], precisions, [0.0]))
@@ -118,6 +136,211 @@ def calculate_average_precision(
     # Find points where recall changes
     i = np.where(mrec[1:] != mrec[:-1])[0]
 
-    # Sum of rectangular areas under the envelope
+    # Sum of rectangular step areas under the envelope
     ap = float(np.sum((mrec[i + 1] - mrec[i]) * mpre[i + 1]))
-    return ap
+    return max(0.0, min(1.0, ap))
+
+
+# Backwards-compatibility alias
+calculate_average_precision = calculate_all_points_interpolated_ap
+
+
+def match_detections_for_class(
+    pred_boxes: List[Tuple[float, float, float, float]],
+    pred_scores: List[float],
+    pred_image_ids: List[str],
+    gt_boxes: List[Tuple[float, float, float, float]],
+    gt_image_ids: List[str],
+    iou_threshold: float = 0.50
+) -> Tuple[np.ndarray, np.ndarray, int]:
+    """
+    Performs greedy bipartite matching between predictions and ground-truth boxes for a single class.
+
+    Rules:
+    1. Sort all predictions globally descending by confidence score.
+    2. For each prediction, find the ground-truth box in the same image with the highest IoU.
+    3. If highest IoU >= iou_threshold:
+       - If that GT box has NOT been matched yet -> True Positive (TP = 1, FP = 0).
+       - If that GT box was ALREADY matched by an earlier higher-confidence prediction -> False Positive (TP = 0, FP = 1).
+    4. If highest IoU < iou_threshold -> False Positive (TP = 0, FP = 1).
+    5. Predictions in images with no GT boxes are marked as False Positives.
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray, int]: (tp_array, fp_array, total_num_gt)
+    """
+    num_gt = len(gt_boxes)
+    num_preds = len(pred_boxes)
+
+    if num_preds == 0:
+        return np.array([]), np.array([]), num_gt
+
+    # Group ground truth boxes by image_id
+    gt_by_image: Dict[str, List[Tuple[int, Tuple[float, float, float, float]]]] = {}
+    for idx, (img_id, box) in enumerate(zip(gt_image_ids, gt_boxes)):
+        gt_by_image.setdefault(img_id, []).append((idx, box))
+
+    # Track which GT boxes have already been claimed (set of global GT indices)
+    matched_gt_indices: Set[int] = set()
+
+    # Sort prediction indices descending by confidence, breaking ties deterministically
+    sorted_pred_indices = sorted(range(num_preds), key=lambda i: (pred_scores[i], -i), reverse=True)
+
+    tp = np.zeros(num_preds, dtype=np.float32)
+    fp = np.zeros(num_preds, dtype=np.float32)
+
+    for rank, p_idx in enumerate(sorted_pred_indices):
+        p_box = pred_boxes[p_idx]
+        p_img = pred_image_ids[p_idx]
+
+        candidates = gt_by_image.get(p_img, [])
+        if not candidates:
+            # No ground truth in this image -> False Positive
+            fp[rank] = 1.0
+            continue
+
+        best_iou = -1.0
+        best_gt_idx = -1
+
+        for gt_idx, g_box in candidates:
+            iou = compute_iou_voc(p_box, g_box)
+            if iou > best_iou:
+                best_iou = iou
+                best_gt_idx = gt_idx
+
+        if best_iou >= iou_threshold:
+            if best_gt_idx not in matched_gt_indices:
+                # First valid match -> True Positive
+                tp[rank] = 1.0
+                matched_gt_indices.add(best_gt_idx)
+            else:
+                # Duplicate prediction on already-matched ground truth -> False Positive
+                fp[rank] = 1.0
+        else:
+            # Below IoU overlap threshold -> False Positive
+            fp[rank] = 1.0
+
+    return tp, fp, num_gt
+
+
+def evaluate_detections_for_class(
+    pred_boxes: List[Tuple[float, float, float, float]],
+    pred_scores: List[float],
+    pred_image_ids: List[str],
+    gt_boxes: List[Tuple[float, float, float, float]],
+    gt_image_ids: List[str],
+    iou_threshold: float = 0.50
+) -> Dict[str, Any]:
+    """
+    Evaluates detections for a single defect class at a specified IoU threshold.
+
+    Handles edge cases:
+    - Zero ground truth instances: returns AP = float('nan'), documented as unrepresented class.
+    - Zero predictions: returns AP = 0.0.
+
+    Returns:
+        Dict with keys: 'ap', 'precision', 'recall', 'num_gt', 'num_preds', 'num_tp', 'num_fp'
+    """
+    tp, fp, num_gt = match_detections_for_class(
+        pred_boxes, pred_scores, pred_image_ids,
+        gt_boxes, gt_image_ids, iou_threshold=iou_threshold
+    )
+
+    if num_gt == 0:
+        return {
+            "ap": float("nan"),
+            "precision": np.array([]),
+            "recall": np.array([]),
+            "num_gt": 0,
+            "num_preds": len(pred_boxes),
+            "num_tp": 0,
+            "num_fp": len(pred_boxes)
+        }
+
+    if len(tp) == 0:
+        return {
+            "ap": 0.0,
+            "precision": np.array([]),
+            "recall": np.array([]),
+            "num_gt": num_gt,
+            "num_preds": 0,
+            "num_tp": 0,
+            "num_fp": 0
+        }
+
+    cum_tp = np.cumsum(tp)
+    cum_fp = np.cumsum(fp)
+
+    recalls = cum_tp / float(num_gt)
+    precisions = cum_tp / (cum_tp + cum_fp)
+
+    ap = calculate_all_points_interpolated_ap(recalls, precisions)
+
+    return {
+        "ap": round(ap, 4),
+        "precision": precisions,
+        "recall": recalls,
+        "num_gt": num_gt,
+        "num_preds": len(tp),
+        "num_tp": int(cum_tp[-1]) if len(cum_tp) > 0 else 0,
+        "num_fp": int(cum_fp[-1]) if len(cum_fp) > 0 else 0
+    }
+
+
+def evaluate_dataset_detections(
+    all_pred_boxes: Dict[int, List[Tuple[float, float, float, float]]],
+    all_pred_scores: Dict[int, List[float]],
+    all_pred_image_ids: Dict[int, List[str]],
+    all_gt_boxes: Dict[int, List[Tuple[float, float, float, float]]],
+    all_gt_image_ids: Dict[int, List[str]],
+    class_names: Optional[Dict[int, str]] = None
+) -> Dict[str, Any]:
+    """
+    Computes comprehensive dataset evaluation:
+    - Per-class AP@50 and mAP@50
+    - Multi-threshold mAP@50:95 (averaged across IoU thresholds [0.50, 0.55, ..., 0.95])
+
+    Returns:
+        Dict[str, Any]: Telemetry report with per-class and mean metrics.
+    """
+    all_classes = sorted(list(set(all_gt_boxes.keys()) | set(all_pred_boxes.keys())))
+    iou_thresholds = np.linspace(0.50, 0.95, 10)
+
+    per_class_ap50: Dict[str, float] = {}
+    per_class_map: Dict[str, float] = {}
+
+    for cls_id in all_classes:
+        c_name = class_names.get(cls_id, f"class_{cls_id}") if class_names else f"class_{cls_id}"
+
+        p_boxes = all_pred_boxes.get(cls_id, [])
+        p_scores = all_pred_scores.get(cls_id, [])
+        p_imgs = all_pred_image_ids.get(cls_id, [])
+
+        g_boxes = all_gt_boxes.get(cls_id, [])
+        g_imgs = all_gt_image_ids.get(cls_id, [])
+
+        # Evaluate at IoU 0.50
+        res50 = evaluate_detections_for_class(p_boxes, p_scores, p_imgs, g_boxes, g_imgs, iou_threshold=0.50)
+        per_class_ap50[c_name] = res50["ap"]
+
+        # Evaluate across 10 IoU thresholds for COCO mAP@50:95
+        ap_list = []
+        for iou_t in iou_thresholds:
+            res_t = evaluate_detections_for_class(p_boxes, p_scores, p_imgs, g_boxes, g_imgs, iou_threshold=float(iou_t))
+            if not np.isnan(res_t["ap"]):
+                ap_list.append(res_t["ap"])
+
+        per_class_map[c_name] = round(float(np.mean(ap_list)), 4) if ap_list else float("nan")
+
+    # Mean metrics across valid classes
+    valid_ap50 = [v for v in per_class_ap50.values() if not np.isnan(v)]
+    valid_map = [v for v in per_class_map.values() if not np.isnan(v)]
+
+    map50 = round(float(np.mean(valid_ap50)), 4) if valid_ap50 else 0.0
+    map50_95 = round(float(np.mean(valid_map)), 4) if valid_map else 0.0
+
+    return {
+        "mAP50": map50,
+        "mAP50_95": map50_95,
+        "per_class_ap50": per_class_ap50,
+        "per_class_mAP50_95": per_class_map
+    }

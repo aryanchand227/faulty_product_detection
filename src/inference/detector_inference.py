@@ -33,24 +33,80 @@ DEFECT_COLOR_PALETTE: Dict[str, Tuple[int, int, int]] = {
 
 @dataclass
 class DetectionBox:
-    """Represents a single localized industrial surface defect bounding box."""
+    """
+    Represents a single localized industrial surface defect bounding box.
+
+    Note:
+        `bbox_area_ratio` represents the footprint of the enclosing rectangular box,
+        which includes surrounding undamaged surface for irregular defects.
+        True damaged pixel area is measured by pixel-level segmentation (U-Net).
+    """
     class_id: int
     class_name: str
     confidence: float
     box_xyxy: Tuple[float, float, float, float]       # (xmin, ymin, xmax, ymax) in pixels
     box_normalized: Tuple[float, float, float, float] # (xcenter, ycenter, width, height) in [0, 1]
-    area_pixels: float
-    area_ratio: float                                 # Defect area relative to total image area
+    bbox_area_pixels: float                           # Rectangular bounding box area in pixels (w * h)
+    bbox_area_ratio: float                            # Bounding box area relative to total image area
+
+
+def compute_bbox_union_area(
+    boxes_xyxy: List[Tuple[float, float, float, float]],
+    img_w: int,
+    img_h: int
+) -> Tuple[float, float]:
+    """
+    Computes exact union area of multiple bounding boxes on the discrete image grid.
+    Prevents double-counting overlapping regions when multiple defects intersect.
+
+    Args:
+        boxes_xyxy: List of bounding boxes [(xmin, ymin, xmax, ymax), ...]
+        img_w: Image width in pixels
+        img_h: Image height in pixels
+
+    Returns:
+        Tuple[float, float]: (union_pixels, union_ratio_relative_to_image)
+    """
+    if not boxes_xyxy or img_w <= 0 or img_h <= 0:
+        return 0.0, 0.0
+
+    mask = np.zeros((img_h, img_w), dtype=np.uint8)
+    for box in boxes_xyxy:
+        x1 = max(0, min(img_w, int(round(box[0]))))
+        y1 = max(0, min(img_h, int(round(box[1]))))
+        x2 = max(0, min(img_w, int(round(box[2]))))
+        y2 = max(0, min(img_h, int(round(box[3]))))
+        if x2 > x1 and y2 > y1:
+            mask[y1:y2, x1:x2] = 1
+
+    union_px = float(np.count_nonzero(mask))
+    total_px = float(img_w * img_h)
+    union_ratio = union_px / total_px if total_px > 0 else 0.0
+    return union_px, round(union_ratio, 6)
 
 
 @dataclass
 class DetectionResponse:
-    """Structured inspection payload for image object detection."""
+    """
+    Structured inspection payload for image object detection.
+
+    Attributes:
+        image_width: Width of inspected image in pixels
+        image_height: Height of inspected image in pixels
+        num_detections: Total number of localized defect boxes
+        is_defective: True if at least one defect was detected
+        inference_time_ms: Wall-clock forward pass latency in milliseconds
+        total_bbox_union_area_pixels: True union area of all detected boxes (no double-counting)
+        total_bbox_union_area_ratio: Union bounding box area relative to total product surface
+        detections: List of individual DetectionBox objects
+    """
     image_width: int
     image_height: int
     num_detections: int
     is_defective: bool
     inference_time_ms: float
+    total_bbox_union_area_pixels: float = 0.0
+    total_bbox_union_area_ratio: float = 0.0
     detections: List[DetectionBox] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -167,8 +223,8 @@ class YOLODetector:
                     xmin, ymin, xmax, ymax = float(box[0]), float(box[1]), float(box[2]), float(box[3])
                     bw = max(0.0, xmax - xmin)
                     bh = max(0.0, ymax - ymin)
-                    area_px = bw * bh
-                    area_ratio = area_px / total_pixels if total_pixels > 0 else 0.0
+                    bbox_area_px = bw * bh
+                    bbox_area_ratio = bbox_area_px / total_pixels if total_pixels > 0 else 0.0
 
                     # Compute normalized (x_center, y_center, width, height)
                     xc_norm = ((xmin + xmax) / 2.0) / img_w
@@ -182,9 +238,13 @@ class YOLODetector:
                         confidence=round(score, 4),
                         box_xyxy=(round(xmin, 1), round(ymin, 1), round(xmax, 1), round(ymax, 1)),
                         box_normalized=(round(xc_norm, 4), round(yc_norm, 4), round(w_norm, 4), round(h_norm, 4)),
-                        area_pixels=round(area_px, 1),
-                        area_ratio=round(area_ratio, 6)
+                        bbox_area_pixels=round(bbox_area_px, 1),
+                        bbox_area_ratio=round(bbox_area_ratio, 6)
                     ))
+
+        # Calculate exact union area of all detected boxes (preventing double-counting of overlaps)
+        raw_boxes = [d.box_xyxy for d in detections]
+        union_px, union_ratio = compute_bbox_union_area(raw_boxes, img_w, img_h)
 
         return DetectionResponse(
             image_width=img_w,
@@ -192,6 +252,8 @@ class YOLODetector:
             num_detections=len(detections),
             is_defective=len(detections) > 0,
             inference_time_ms=round(elapsed_ms, 2),
+            total_bbox_union_area_pixels=round(union_px, 1),
+            total_bbox_union_area_ratio=round(union_ratio, 6),
             detections=detections
         )
 
@@ -297,3 +359,4 @@ class YOLODetector:
         logger.info(f"Exporting YOLO model to ONNX with imgsz={imgsz}...")
         exported = self.model.export(format="onnx", imgsz=imgsz)
         return Path(exported)
+
