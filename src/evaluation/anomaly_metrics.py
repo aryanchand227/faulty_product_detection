@@ -267,3 +267,4 @@ def evaluate_anomaly_detection(
         recall=round(rec, 4),
         confusion_matrix=cm
     )
+

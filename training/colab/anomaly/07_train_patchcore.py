@@ -326,6 +326,19 @@ with open(metrics_file, "w", encoding="utf-8") as f:
     }, f, indent=2)
 print(f"[Save] Metrics JSON exported to: {metrics_file}")
 
+# Optional Ablation Study
+if "--run-ablations" in sys.argv:
+    print("\n" + "=" * 70)
+    print("8. EXECUTING COMPREHENSIVE ABLATION STUDY")
+    print("=" * 70)
+    from src.training.run_patchcore_ablations import run_full_ablation_suite
+    ablation_out = run_full_ablation_suite(
+        mvtec_bottle_root=str(MVTEC_BOTTLE_DIR),
+        device=str(device),
+        output_dir="reports"
+    )
+    print(f"[Ablation] Summary available at: {ablation_out['md_path']}")
+
 if HF_REPO_ID and hf_token:
     print(f"\n[Hub] Uploading model artifacts to Hugging Face Hub: {HF_REPO_ID}...")
     try:
@@ -347,6 +360,22 @@ if HF_REPO_ID and hf_token:
             repo_id=HF_REPO_ID,
             repo_type="model"
         )
+        ablation_plot = Path("reports/figures/patchcore_ablation_comparison.png")
+        if ablation_plot.exists():
+            api.upload_file(
+                path_or_fileobj=str(ablation_plot),
+                path_in_repo="visuals/patchcore_ablation_comparison.png",
+                repo_id=HF_REPO_ID,
+                repo_type="model"
+            )
+        ablation_summary = Path("reports/patchcore_ablation_summary.md")
+        if ablation_summary.exists():
+            api.upload_file(
+                path_or_fileobj=str(ablation_summary),
+                path_in_repo="patchcore_ablation_summary.md",
+                repo_id=HF_REPO_ID,
+                repo_type="model"
+            )
         print(f"[Hub] Upload successful! Artifacts visible at: https://huggingface.co/{HF_REPO_ID}")
     except Exception as e:
         print(f"[Hub] Upload failed with exception: {e}")
@@ -354,3 +383,4 @@ if HF_REPO_ID and hf_token:
 print("\n" + "=" * 70)
 print("PHASE 7 COMPLETE: PATCHCORE ANOMALY DETECTION BENCHMARKED SUCCESSFULLY")
 print("=" * 70)
+

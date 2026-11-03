@@ -181,3 +181,29 @@ def test_anomaly_inferencer_triage_decision_and_overlay():
     overlay = inferencer.draw_anomaly_overlay(dummy_img, a_map, threshold=1.0)
     assert overlay.shape == dummy_img.shape
     assert overlay.dtype == np.uint8
+
+
+def test_patchcore_ablation_options():
+    """Verify ablation configurations: top-k image score and sigma=0 unsmoothed maps."""
+    model = PatchCore(backbone_name="resnet18", device="cpu")
+    model.memory_bank = torch.randn(10, 384)
+    dummy_input = torch.randn(2, 3, 224, 224)
+
+    # 1. Test top-k scoring vs max scoring
+    _, max_scores, spatial_hw = model.predict_patches(dummy_input, score_method="max")
+    patch_dists, topk_scores, _ = model.predict_patches(dummy_input, score_method="top_k", top_k=5)
+
+    assert max_scores.shape == (2,)
+    assert topk_scores.shape == (2,)
+    # By definition, the mean of top-k values is <= max value
+    assert torch.all(topk_scores <= max_scores + 1e-5)
+
+    # 2. Test sigma=0.0 (no Gaussian filter) vs sigma=4.0
+    raw_map = model.compute_anomaly_maps(patch_dists, spatial_hw, output_hw=(50, 50), sigma=0.0)
+    smoothed_map = model.compute_anomaly_maps(patch_dists, spatial_hw, output_hw=(50, 50), sigma=4.0)
+
+    assert raw_map.shape == (2, 50, 50)
+    assert smoothed_map.shape == (2, 50, 50)
+    # Smoothing changes local variance
+    assert not np.array_equal(raw_map, smoothed_map)
+

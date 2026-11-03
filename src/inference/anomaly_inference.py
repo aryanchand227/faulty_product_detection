@@ -94,7 +94,9 @@ class PatchCoreInferencer:
         threshold: Optional[float] = None,
         review_margin: Optional[float] = None,
         mm_per_pixel: Optional[float] = None,
-        sigma: float = 4.0
+        sigma: float = 4.0,
+        score_method: str = "max",
+        top_k: int = 5
     ) -> Tuple[AnomalyInspectionResponse, np.ndarray, np.ndarray]:
         """
         Executes anomaly inspection on an input product image.
@@ -105,6 +107,8 @@ class PatchCoreInferencer:
             review_margin: Fraction around threshold classified as "REVIEW".
             mm_per_pixel: Camera calibration factor in mm per pixel.
             sigma: Standard deviation for Gaussian smoothing.
+            score_method: 'max' or 'top_k'.
+            top_k: Number of highest-scoring patches to average if score_method='top_k'.
 
         Returns:
             Tuple containing:
@@ -143,7 +147,9 @@ class PatchCoreInferencer:
 
         # 3. Model forward pass (if memory bank is initialized)
         if self.model.memory_bank is not None:
-            patch_dists, img_scores, spatial_hw = self.model.predict_patches(img_tensor)
+            patch_dists, img_scores, spatial_hw = self.model.predict_patches(
+                img_tensor, score_method=score_method, top_k=top_k
+            )
             img_score = float(img_scores[0].item())
             # Generate smoothed anomaly map at original resolution
             anomaly_map = self.model.compute_anomaly_maps(
@@ -260,3 +266,4 @@ class PatchCoreInferencer:
         cv2.drawContours(vis_img, contours, -1, (255, 0, 0), 2)
 
         return vis_img
+

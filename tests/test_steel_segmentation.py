@@ -36,3 +36,4 @@ def test_steel_segmentation_dataset_getitem(tmp_path):
     assert mask_t.shape == (1, 224, 224)
     assert meta["category"] == "crazing"
     assert meta["supervision_type"] == "weak_pseudo_label"
+

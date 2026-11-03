@@ -111,10 +111,13 @@ def run_patchcore_training(
     target_size: Tuple[int, int] = (224, 224),
     batch_size: int = 16,
     device: str = "cpu",
+    sigma: float = 4.0,
+    score_method: str = "max",
+    top_k: int = 5,
     save_path: Optional[Union[str, Path]] = "models/checkpoints/patchcore_bottle_resnet18.pt"
 ) -> Dict[str, Union[float, int, str]]:
     """
-    Fits and evaluates PatchCore on MVTec Bottle benchmark.
+    Fits and evaluates PatchCore on MVTec Bottle benchmark with configurable ablations.
     """
     root = Path(mvtec_bottle_root)
     train_good_dir = root / "train" / "good"
@@ -152,22 +155,27 @@ def run_patchcore_training(
     anomaly_maps: List[np.ndarray] = []
 
     model.backbone.eval()
+    infer_start = time.time()
     with torch.no_grad():
         for i in range(len(test_dataset)):
             img_t, mask_bin, is_defect, defect_type = test_dataset[i]
             img_batch = img_t.unsqueeze(0).to(device)
 
-            patch_dists, img_scores, spatial_hw = model.predict_patches(img_batch)
+            patch_dists, img_scores, spatial_hw = model.predict_patches(
+                img_batch, score_method=score_method, top_k=top_k
+            )
             score = float(img_scores[0].item())
 
             a_map = model.compute_anomaly_maps(
-                patch_dists, spatial_hw, output_hw=target_size, sigma=4.0
+                patch_dists, spatial_hw, output_hw=target_size, sigma=sigma
             )[0]
 
             y_true_labels.append(is_defect)
             y_image_scores.append(score)
             gt_masks.append(mask_bin)
             anomaly_maps.append(a_map)
+
+    mean_latency_ms = ((time.time() - infer_start) / len(test_dataset)) * 1000.0
 
     # Compute comprehensive evaluation metrics
     eval_result = evaluate_anomaly_detection(
@@ -180,11 +188,17 @@ def run_patchcore_training(
 
     model.threshold = eval_result.optimal_threshold
 
+    mem_bytes = model.memory_bank.element_size() * model.memory_bank.nelement() if model.memory_bank is not None else 0
+    mem_mb = round(mem_bytes / (1024 ** 2), 2)
+
     print("\n" + "=" * 50)
     print("           PATCHCORE BENCHMARK RESULTS           ")
     print("=" * 50)
     print(f"Backbone:               {backbone_name}")
     print(f"Coreset Ratio:          {coreset_ratio * 100:.1f}%")
+    print(f"Smoothing (sigma):      {sigma}")
+    print(f"Scoring Function:       {score_method} (top_k={top_k})")
+    print(f"Prototypes:             {num_prototypes} ({mem_mb} MB)")
     print(f"Image AUROC:            {eval_result.image_auroc:.4f}")
     print(f"Pixel AUROC:            {eval_result.pixel_auroc:.4f}")
     print(f"AUPRO (FPR <= 0.30):    {eval_result.aupro:.4f}")
@@ -192,6 +206,7 @@ def run_patchcore_training(
     print(f"F1-Score:               {eval_result.f1_score:.4f}")
     print(f"Precision:              {eval_result.precision:.4f}")
     print(f"Recall:                 {eval_result.recall:.4f}")
+    print(f"Mean Latency:           {mean_latency_ms:.2f} ms")
     print(f"Confusion Matrix:       {eval_result.confusion_matrix}")
     print("=" * 50 + "\n")
 
@@ -203,8 +218,13 @@ def run_patchcore_training(
     return {
         "backbone": backbone_name,
         "coreset_ratio": coreset_ratio,
+        "sigma": sigma,
+        "score_method": score_method,
+        "top_k": top_k,
         "prototypes": num_prototypes,
+        "memory_mb": mem_mb,
         "fit_duration_sec": fit_duration_sec,
+        "mean_latency_ms": round(mean_latency_ms, 2),
         "image_auroc": eval_result.image_auroc,
         "pixel_auroc": eval_result.pixel_auroc,
         "aupro": eval_result.aupro if eval_result.aupro is not None else 0.0,
@@ -240,3 +260,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

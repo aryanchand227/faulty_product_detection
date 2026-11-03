@@ -311,7 +311,9 @@ class PatchCore:
     def predict_patches(
         self,
         images: torch.Tensor,
-        chunk_size: int = 256
+        chunk_size: int = 256,
+        score_method: str = "max",
+        top_k: int = 5
     ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, int]]:
         """
         Computes nearest-neighbor patch anomaly distances against the memory bank.
@@ -319,11 +321,13 @@ class PatchCore:
         Args:
             images: Tensor of shape (B, 3, H, W).
             chunk_size: Size for chunking distance matrix to prevent OOM.
+            score_method: 'max' (maximum patch distance) or 'top_k' (mean of top-k largest patch distances).
+            top_k: Number of highest-scoring patches to average when score_method='top_k'.
 
         Returns:
             Tuple containing:
                 - patch_distances: (B, P) distance of each patch to nearest bank center
-                - image_scores: (B,) maximum patch distance per image
+                - image_scores: (B,) aggregate image anomaly score
                 - spatial_shape: (H2, W2) feature map grid dimensions
         """
         if self.memory_bank is None:
@@ -359,8 +363,13 @@ class PatchCore:
 
         patch_distances = min_dists.reshape(B, P)
 
-        # Image-level anomaly score = max patch anomaly distance
-        image_scores, _ = torch.max(patch_distances, dim=1)
+        # Aggregate Image-level anomaly score
+        if score_method.lower() == "top_k":
+            k_val = min(max(1, top_k), P)
+            topk_vals, _ = torch.topk(patch_distances, k=k_val, dim=1, largest=True)
+            image_scores = torch.mean(topk_vals, dim=1)
+        else:
+            image_scores, _ = torch.max(patch_distances, dim=1)
 
         return patch_distances, image_scores, (H2, W2)
 
@@ -378,7 +387,7 @@ class PatchCore:
             patch_distances: Tensor of shape (B, P) containing patch anomaly distances.
             spatial_shape: (H2, W2) patch grid dimensions.
             output_hw: (target_height, target_width) for output maps.
-            sigma: Standard deviation for Gaussian smoothing filter.
+            sigma: Standard deviation for Gaussian smoothing filter (if <= 0.0, raw bilinear upsampling).
 
         Returns:
             np.ndarray: Anomaly heatmaps of shape (B, H, W) in float32.
@@ -393,6 +402,9 @@ class PatchCore:
         # Bilinear interpolation to target resolution
         upsampled = F.interpolate(grid, size=(out_h, out_w), mode="bilinear", align_corners=False)
         upsampled_np = upsampled.squeeze(1).cpu().numpy()  # (B, H, W)
+
+        if sigma <= 0.0:
+            return upsampled_np
 
         # Apply 2D Gaussian filter to each sample in batch
         smoothed_maps = np.empty_like(upsampled_np)
@@ -438,3 +450,4 @@ class PatchCore:
         mb = state.get("memory_bank")
         if mb is not None:
             self.memory_bank = mb.to(self.device)
+
