@@ -246,6 +246,61 @@ def test_evaluate_dataset_detections_summary():
 # 4. Bounding Box Area Union & Overlap Tests
 # =====================================================================
 
+def test_greedy_matching_second_highest_gt_box_when_highest_is_claimed():
+    """
+    Critical bipartite matching test:
+    Prediction 1 claims GT A.
+    Prediction 2 has highest IoU with GT A (already claimed), but also satisfies
+    threshold with unmatched GT B.
+    Prediction 2 MUST match GT B instead of being prematurely marked False Positive.
+    """
+    # GT A at [0, 0, 40, 40], GT B at [40, 0, 80, 40]
+    gt_boxes = [
+        (0.0, 0.0, 40.0, 40.0),    # GT A (idx 0)
+        (40.0, 0.0, 80.0, 40.0)    # GT B (idx 1)
+    ]
+    gt_images = ["img_1", "img_1"]
+
+    # Pred 1: perfect match with GT A
+    # Pred 2: spans [10, 0, 60, 40] -> overlaps GT A (area 30x40=1200 / union 50x40=2000 -> IoU 0.60)
+    #                                  overlaps GT B (area 20x40=800  / union 50x40=2000 -> IoU 0.40)
+    # Let's calibrate Pred 2 so IoU with GT A is 0.70 and with GT B is 0.55:
+    # GT A: [0, 0, 100, 100], GT B: [80, 0, 180, 100]
+    # Pred 1: [0, 0, 100, 100] -> IoU with A = 1.0 (Conf 0.95)
+    # Pred 2: [50, 0, 160, 100] (Conf 0.85)
+    #   Overlap with A: [50..100] = 50x100 = 5000. Union = 160x100 = 16000 -> IoU = 50/160 = 0.31
+    # Let's construct exact geometric boxes:
+    # GT A: [0, 0, 50, 50], area 2500
+    # GT B: [40, 0, 90, 50], area 2500
+    # P1: [0, 0, 50, 50], IoU(P1, A) = 1.0
+    # P2: [25, 0, 75, 50], w=50, h=50, area 2500
+    #   IoU(P2, A): overlap [25..50]=25x50=1250, union [0..75]=75x50=3750 -> IoU = 1250/3750 = 0.333
+    # Instead, let's use two overlapping boxes where IoU with A is 0.80 and with B is 0.60:
+    # Box A: [0, 0, 100, 100]
+    # Box B: [20, 0, 120, 100]
+    # P1: [0, 0, 100, 100] (Conf 0.95) -> IoU with A = 1.0, IoU with B = 80/120 = 0.667
+    # P2: [10, 0, 110, 100] (Conf 0.85) -> IoU with A = 90/110 = 0.818, IoU with B = 90/110 = 0.818
+    gt_a = (0.0, 0.0, 100.0, 100.0)
+    gt_b = (20.0, 0.0, 120.0, 100.0)
+    gt_boxes = [gt_a, gt_b]
+    gt_images = ["img_1", "img_1"]
+
+    p1 = (0.0, 0.0, 100.0, 100.0)   # Conf 0.95 -> matches GT A
+    p2 = (10.0, 0.0, 110.0, 100.0)  # Conf 0.85 -> has IoU 0.818 with GT A (claimed), but also 0.818 with GT B!
+    pred_boxes = [p1, p2]
+    pred_scores = [0.95, 0.85]
+    pred_images = ["img_1", "img_1"]
+
+    tp, fp, num_gt = match_detections_for_class(
+        pred_boxes, pred_scores, pred_images, gt_boxes, gt_images, iou_threshold=0.50
+    )
+
+    assert num_gt == 2
+    # Both predictions must be True Positives!
+    assert np.array_equal(tp, [1.0, 1.0]), f"Expected [1.0, 1.0], got tp={tp}, fp={fp}"
+    assert np.array_equal(fp, [0.0, 0.0])
+
+
 def test_compute_bbox_union_area_disjoint():
     # Two disjoint boxes of size 10x10 -> total area should be exactly 200 pixels
     boxes = [
@@ -317,3 +372,42 @@ def test_yolo_detector_draw_detections():
     assert annotated.shape == dummy_img.shape
     assert annotated.dtype == dummy_img.dtype
     assert np.any(annotated > 0)
+
+
+def test_compute_bbox_union_area_float_and_out_of_bounds():
+    """Verify float coordinates, floor/ceil rasterization, and strict sensor boundary clipping."""
+    img_w, img_h = 100, 100
+
+    # 1. Float coordinates box: [10.2, 10.4, 30.8, 40.1]
+    # floor(10.2) = 10, ceil(30.8) = 31 -> w = 21
+    # floor(10.4) = 10, ceil(40.1) = 41 -> h = 31
+    # area = 21 * 31 = 651 pixels
+    boxes = [(10.2, 10.4, 30.8, 40.1)]
+    union_px, union_ratio = compute_bbox_union_area(boxes, img_w, img_h)
+    assert union_px == 651.0
+    assert pytest.approx(union_ratio, rel=1e-4) == 651.0 / 10000.0
+
+    # 2. Box with negative coordinates extending beyond sensor boundary: [-20.0, -10.0, 50.0, 50.0]
+    # Clipped to [0, 0, 50, 50] -> area = 2500 pixels
+    boxes_clipped = [(-20.0, -10.0, 50.0, 50.0)]
+    union_px, _ = compute_bbox_union_area(boxes_clipped, img_w, img_h)
+    assert union_px == 2500.0
+
+    # 3. Box completely out of bounds: [150.0, 150.0, 200.0, 200.0] on 100x100
+    # Clipped to [100, 100, 100, 100] -> area = 0
+    boxes_oob = [(150.0, 150.0, 200.0, 200.0)]
+    union_px, union_ratio = compute_bbox_union_area(boxes_oob, img_w, img_h)
+    assert union_px == 0.0
+    assert union_ratio == 0.0
+
+
+def test_yolo_detector_physical_area_calibration():
+    """Verify camera calibration factor mm_per_pixel correctly computes physical area in mm^2."""
+    detector = YOLODetector(model_path="yolov8n.pt", device="cpu")
+    dummy_img = np.zeros((100, 100, 3), dtype=np.uint8)
+
+    # With mm_per_pixel = 0.5 mm/px
+    # If 0 defects, physical area is 0.0
+    res = detector.predict(dummy_img, mm_per_pixel=0.5)
+    assert res.physical_union_area_mm2 is not None
+    assert res.physical_union_area_mm2 == 0.0

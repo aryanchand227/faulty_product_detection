@@ -192,31 +192,36 @@ def match_detections_for_class(
         p_box = pred_boxes[p_idx]
         p_img = pred_image_ids[p_idx]
 
+        # Candidate ground truths in this image
         candidates = gt_by_image.get(p_img, [])
         if not candidates:
             # No ground truth in this image -> False Positive
             fp[rank] = 1.0
             continue
 
-        best_iou = -1.0
-        best_gt_idx = -1
+        # Compute IoU between prediction and all GT boxes in this image
+        # Sort candidates descending by IoU
+        candidates_with_iou = [
+            (gt_idx, compute_iou_voc(p_box, g_box))
+            for gt_idx, g_box in candidates
+        ]
+        candidates_with_iou.sort(key=lambda x: x[1], reverse=True)
 
-        for gt_idx, g_box in candidates:
-            iou = compute_iou_voc(p_box, g_box)
-            if iou > best_iou:
-                best_iou = iou
-                best_gt_idx = gt_idx
-
-        if best_iou >= iou_threshold:
-            if best_gt_idx not in matched_gt_indices:
-                # First valid match -> True Positive
+        # Greedily match with the highest-IoU UNMATCHED ground-truth box
+        matched = False
+        for gt_idx, iou in candidates_with_iou:
+            if iou < iou_threshold:
+                # Since candidates are sorted descending by IoU, no subsequent candidate will satisfy threshold
+                break
+            if gt_idx not in matched_gt_indices:
+                # Valid match found: assign True Positive and claim ground truth
+                matched_gt_indices.add(gt_idx)
                 tp[rank] = 1.0
-                matched_gt_indices.add(best_gt_idx)
-            else:
-                # Duplicate prediction on already-matched ground truth -> False Positive
-                fp[rank] = 1.0
-        else:
-            # Below IoU overlap threshold -> False Positive
+                matched = True
+                break
+
+        if not matched:
+            # Either highest-IoU boxes were already claimed, or all had IoU < threshold -> False Positive
             fp[rank] = 1.0
 
     return tp, fp, num_gt

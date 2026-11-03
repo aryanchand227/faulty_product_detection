@@ -59,10 +59,21 @@ def compute_bbox_union_area(
     Computes exact union area of multiple bounding boxes on the discrete image grid.
     Prevents double-counting overlapping regions when multiple defects intersect.
 
+    Coordinate Handling & Pixel Boundary Convention:
+    -----------------------------------------------
+    YOLO predictions produce continuous floating-point coordinates. To rasterize onto
+    the discrete pixel grid without spatial distortion or array boundary errors:
+    - Lower bounds (xmin, ymin) are floored: x1 = floor(xmin), clamped to [0, img_w]
+    - Upper bounds (xmax, ymax) are ceiled:  x2 = ceil(xmax),  clamped to [0, img_w]
+    - Python half-open slice mask[y1:y2, x1:x2] covers all discrete pixels touched
+      by the continuous bounding box footprint.
+    - Out-of-bounds predictions (e.g. extending beyond sensor borders or negative)
+      are strictly clipped to the valid sensor domain [0, img_w] x [0, img_h].
+
     Args:
         boxes_xyxy: List of bounding boxes [(xmin, ymin, xmax, ymax), ...]
-        img_w: Image width in pixels
-        img_h: Image height in pixels
+        img_w: Image sensor width in pixels
+        img_h: Image sensor height in pixels
 
     Returns:
         Tuple[float, float]: (union_pixels, union_ratio_relative_to_image)
@@ -72,10 +83,12 @@ def compute_bbox_union_area(
 
     mask = np.zeros((img_h, img_w), dtype=np.uint8)
     for box in boxes_xyxy:
-        x1 = max(0, min(img_w, int(round(box[0]))))
-        y1 = max(0, min(img_h, int(round(box[1]))))
-        x2 = max(0, min(img_w, int(round(box[2]))))
-        y2 = max(0, min(img_h, int(round(box[3]))))
+        # Robust float conversion, floor/ceil boundary mapping, and strict sensor clamping
+        x1 = max(0, min(img_w, int(np.floor(float(box[0])))))
+        y1 = max(0, min(img_h, int(np.floor(float(box[1])))))
+        x2 = max(0, min(img_w, int(np.ceil(float(box[2])))))
+        y2 = max(0, min(img_h, int(np.ceil(float(box[3])))))
+
         if x2 > x1 and y2 > y1:
             mask[y1:y2, x1:x2] = 1
 
@@ -98,6 +111,7 @@ class DetectionResponse:
         inference_time_ms: Wall-clock forward pass latency in milliseconds
         total_bbox_union_area_pixels: True union area of all detected boxes (no double-counting)
         total_bbox_union_area_ratio: Union bounding box area relative to total product surface
+        physical_union_area_mm2: Optional calibrated physical area in square millimeters (requires mm_per_pixel)
         detections: List of individual DetectionBox objects
     """
     image_width: int
@@ -107,6 +121,7 @@ class DetectionResponse:
     inference_time_ms: float
     total_bbox_union_area_pixels: float = 0.0
     total_bbox_union_area_ratio: float = 0.0
+    physical_union_area_mm2: Optional[float] = None
     detections: List[DetectionBox] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -153,7 +168,8 @@ class YOLODetector:
         self,
         image_input: Union[np.ndarray, Image.Image, str, Path],
         conf_threshold: Optional[float] = None,
-        iou_threshold: Optional[float] = None
+        iou_threshold: Optional[float] = None,
+        mm_per_pixel: Optional[float] = None
     ) -> DetectionResponse:
         """
         Executes defect detection on a single image.
@@ -162,6 +178,8 @@ class YOLODetector:
             image_input: File path, PIL Image, or NumPy array (RGB/BGR).
             conf_threshold: Optional confidence threshold override.
             iou_threshold: Optional IoU suppression threshold override.
+            mm_per_pixel: Optional camera calibration factor (mm per pixel) to compute
+                          calibrated physical defect area (mm^2).
 
         Returns:
             DetectionResponse: Structured payload containing localized defects.
@@ -245,6 +263,7 @@ class YOLODetector:
         # Calculate exact union area of all detected boxes (preventing double-counting of overlaps)
         raw_boxes = [d.box_xyxy for d in detections]
         union_px, union_ratio = compute_bbox_union_area(raw_boxes, img_w, img_h)
+        physical_mm2 = round(union_px * (float(mm_per_pixel) ** 2), 2) if mm_per_pixel is not None else None
 
         return DetectionResponse(
             image_width=img_w,
@@ -254,6 +273,7 @@ class YOLODetector:
             inference_time_ms=round(elapsed_ms, 2),
             total_bbox_union_area_pixels=round(union_px, 1),
             total_bbox_union_area_ratio=round(union_ratio, 6),
+            physical_union_area_mm2=physical_mm2,
             detections=detections
         )
 

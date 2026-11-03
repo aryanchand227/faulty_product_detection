@@ -169,3 +169,46 @@ def test_unet_segmenter_draw_overlay():
     # Pixels inside the defect region should have changed color
     assert not np.array_equal(annotated[15, 15], dummy_img[15, 15])
 
+
+def test_unet_segmenter_physical_calibration():
+    """Verify camera calibration factor mm_per_pixel correctly computes physical area in mm^2."""
+    segmenter = UNetSegmenter(model_path=None, device="cpu", base_channels=16)
+    dummy_img = np.zeros((100, 100, 3), dtype=np.uint8)
+
+    # 1. Calibration on model prediction: physical area must match defect pixels * (mm_per_pixel^2)
+    response, _, _ = segmenter.predict(dummy_img, mm_per_pixel=0.05)
+    assert response.physical_defect_area_mm2 is not None
+    expected_area = round(response.total_defect_pixels * (0.05 ** 2), 2)
+    assert response.physical_defect_area_mm2 == expected_area
+
+    # 2. Calibration with no defect pixels (threshold > 1.0) must produce exactly 0.0 mm^2
+    response_clean, _, _ = segmenter.predict(dummy_img, threshold=1.1, mm_per_pixel=0.05)
+    assert response_clean.total_defect_pixels == 0
+    assert response_clean.physical_defect_area_mm2 == 0.0
+
+
+def test_mvtec_custom_split_manifest_export(tmp_path):
+    """Verify export_mvtec_custom_split_manifest generates valid JSON with full split documentation."""
+    import json
+    from src.data.segmentation_dataset import export_mvtec_custom_split_manifest
+
+    dummy_train = [(Path("img1.png"), Path("mask1.png"), "broken_large")]
+    dummy_val = [(Path("img2.png"), Path("mask2.png"), "contamination")]
+    dummy_test = [(Path("img3.png"), Path("mask3.png"), "broken_small")]
+
+    manifest_path = tmp_path / "test_manifest.json"
+    exported_path = export_mvtec_custom_split_manifest(
+        dummy_train, dummy_val, dummy_test, output_manifest_path=manifest_path
+    )
+
+    assert exported_path.exists()
+    with open(exported_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    assert "experiment_name" in data
+    assert "methodological_notice" in data
+    assert data["split_counts"]["train"] == 1
+    assert data["split_counts"]["val"] == 1
+    assert data["split_counts"]["test"] == 1
+    assert len(data["train_samples"]) == 1
+

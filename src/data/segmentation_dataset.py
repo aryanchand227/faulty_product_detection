@@ -64,24 +64,20 @@ class IndustrialSegmentationDataset(Dataset):
 
         # 1. Load image (RGB)
         img_np = load_image(img_path, target_size=self.target_size)
+        img_tensor = to_tensor(img_np)
 
         # 2. Load or construct ground-truth mask
         if mask_path is not None and Path(mask_path).exists():
-            mask_np = load_and_preprocess_mask(mask_path, target_size=self.target_size)
+            mask_tensor = load_and_preprocess_mask(mask_path, target_size=self.target_size)
         else:
             # Defect-free / normal sample -> all-zero black mask
-            mask_np = np.zeros(self.target_size, dtype=np.uint8)
+            mask_tensor = load_and_preprocess_mask(None, target_size=self.target_size)
 
         # 3. Apply Dual Augmentation (synchronized spatial transforms, isolated photometric transforms)
         if self.is_training and self.augmentation is not None:
-            img_np, mask_np = self.augmentation(img_np, mask_np)
-
-        # 4. Convert to normalized tensors
-        img_tensor = to_tensor(img_np)
-        img_tensor = normalize_tensor(img_tensor)
-
-        # Mask tensor: shape (1, H, W), float {0.0, 1.0}
-        mask_tensor = torch.from_numpy(mask_np).unsqueeze(0).float()
+            img_tensor, mask_tensor = self.augmentation(img_tensor, mask_tensor)
+        else:
+            img_tensor = normalize_tensor(img_tensor)
 
         metadata = {
             "image_path": str(img_path),
@@ -177,4 +173,59 @@ def build_mvtec_segmentation_splits(
     )
 
     return train_samples, val_samples, test_samples
+
+
+def export_mvtec_custom_split_manifest(
+    train_samples: List[Tuple[Path, Optional[Path], str]],
+    val_samples: List[Tuple[Path, Optional[Path], str]],
+    test_samples: List[Tuple[Path, Optional[Path], str]],
+    output_manifest_path: Union[str, Path] = "experiments/segmentation/bottle_custom_split_manifest.json"
+) -> Path:
+    """
+    Exports a complete JSON manifest documenting exact image IDs per partition.
+
+    Academic & Methodological Transparency Note:
+    --------------------------------------------
+    This custom partition partitions MVTec AD defective test images and ground-truth masks
+    into train/val/test subsets specifically for supervised U-Net experimentation.
+    It is strictly distinct from the official untouched MVTec AD benchmark protocol
+    (normal-only training), which is preserved independently for PatchCore in Phase 7.
+    """
+    import json
+
+    manifest_p = Path(output_manifest_path).resolve()
+    manifest_p.parent.mkdir(parents=True, exist_ok=True)
+
+    def extract_entry(sample: Tuple[Path, Optional[Path], str]) -> Dict[str, str]:
+        img_p, mask_p, cat = sample
+        return {
+            "image_id": f"{cat}_{img_p.stem}",
+            "filename": img_p.name,
+            "category": cat,
+            "has_mask": str(mask_p is not None),
+            "image_path": str(img_p.as_posix())
+        }
+
+    manifest_data = {
+        "experiment_name": "Model A: MVTec Bottle Custom Supervised Segmentation Experiment",
+        "methodological_notice": (
+            "This custom partition uses MVTec AD defective test images and masks for supervised U-Net training. "
+            "It is an empirical supervised study and does NOT claim official untouched MVTec benchmark status. "
+            "The official untouched MVTec AD benchmark is preserved for unsupervised PatchCore in Phase 7."
+        ),
+        "split_counts": {
+            "train": len(train_samples),
+            "val": len(val_samples),
+            "test": len(test_samples)
+        },
+        "train_samples": [extract_entry(s) for s in train_samples],
+        "val_samples": [extract_entry(s) for s in val_samples],
+        "test_samples": [extract_entry(s) for s in test_samples]
+    }
+
+    with open(manifest_p, "w", encoding="utf-8") as f:
+        json.dump(manifest_data, f, indent=2)
+
+    logger.info(f"Saved MVTec custom segmentation split manifest to: {manifest_p}")
+    return manifest_p
 

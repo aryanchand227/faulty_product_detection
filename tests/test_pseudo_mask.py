@@ -41,3 +41,4 @@ def test_pseudo_mask_intensity_refinement():
     assert mask.shape == (100, 100)
     # The dark defect area should have positive mask
     assert np.any(mask[40:60, 40:60] == 255)
+

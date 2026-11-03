@@ -33,18 +33,33 @@ class DefectComponent:
     area_ratio: float
     centroid: Tuple[float, float]
     bounding_box_xywh: Tuple[int, int, int, int]  # (x, y, w, h)
+    physical_area_mm2: Optional[float] = None
 
 
 @dataclass
 class SegmentationResponse:
-    """Structured inspection payload for pixel-level semantic defect segmentation."""
+    """
+    Structured inspection payload for pixel-level semantic defect segmentation.
+
+    Attributes:
+        image_width: Width in pixels
+        image_height: Height in pixels
+        is_defective: True if defect pixels exist
+        total_defect_pixels: Total damaged pixels in the image-plane
+        defect_area_ratio: Fraction of total image-plane pixels covered by defect
+        physical_defect_area_mm2: Optional physical surface area in mm^2 (requires camera calibration)
+        num_defect_components: Number of distinct connected defect blobs
+        inference_time_ms: Forward pass wall-clock latency
+        components: List of individual DefectComponent objects
+    """
     image_width: int
     image_height: int
     is_defective: bool
     total_defect_pixels: int
-    defect_area_ratio: float                     # Fraction of total product surface damaged
+    defect_area_ratio: float
     num_defect_components: int
     inference_time_ms: float
+    physical_defect_area_mm2: Optional[float] = None
     components: List[DefectComponent] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -99,7 +114,8 @@ class UNetSegmenter:
     def predict(
         self,
         image_input: Union[np.ndarray, Image.Image, str, Path],
-        threshold: Optional[float] = None
+        threshold: Optional[float] = None,
+        mm_per_pixel: Optional[float] = None
     ) -> Tuple[SegmentationResponse, np.ndarray, np.ndarray]:
         """
         Executes pixel segmentation on an image.
@@ -107,6 +123,8 @@ class UNetSegmenter:
         Args:
             image_input: File path, PIL Image, or NumPy array (RGB/BGR).
             threshold: Optional threshold override.
+            mm_per_pixel: Optional camera calibration factor (mm per pixel) to compute
+                          physical defect surface area in square millimeters (mm^2).
 
         Returns:
             Tuple containing:
@@ -170,13 +188,17 @@ class UNetSegmenter:
             h = int(stats[i, cv2.CC_STAT_HEIGHT])
             cx, cy = float(centroids[i][0]), float(centroids[i][1])
 
+            comp_phys_mm2 = round(area * (float(mm_per_pixel) ** 2), 3) if mm_per_pixel is not None else None
             components.append(DefectComponent(
                 component_id=i,
                 area_pixels=area,
                 area_ratio=round(area / total_pixels, 6) if total_pixels > 0 else 0.0,
                 centroid=(round(cx, 2), round(cy, 2)),
-                bounding_box_xywh=(x, y, w, h)
+                bounding_box_xywh=(x, y, w, h),
+                physical_area_mm2=comp_phys_mm2
             ))
+
+        total_phys_mm2 = round(total_defect_px * (float(mm_per_pixel) ** 2), 2) if mm_per_pixel is not None else None
 
         response = SegmentationResponse(
             image_width=orig_w,
@@ -184,6 +206,7 @@ class UNetSegmenter:
             is_defective=total_defect_px > 0,
             total_defect_pixels=total_defect_px,
             defect_area_ratio=round(defect_area_ratio, 6),
+            physical_defect_area_mm2=total_phys_mm2,
             num_defect_components=len(components),
             inference_time_ms=round(elapsed_ms, 2),
             components=components
