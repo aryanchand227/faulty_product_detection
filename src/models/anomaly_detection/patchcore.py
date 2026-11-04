@@ -291,12 +291,12 @@ class PatchCore:
         if not all_features:
             raise ValueError("Training DataLoader provided zero samples to build memory bank.")
 
-        full_features = torch.cat(all_features, dim=0).to(self.device)  # (M, D) on GPU
+        full_features = torch.cat(all_features, dim=0)  # (M, D)
         total_patches = full_features.shape[0]
 
-        # Subsample using Greedy k-Center Coreset on GPU tensor cores
+        # Subsample using Greedy k-Center Coreset
         coreset, _ = self.sampler.sample(full_features)
-        self.memory_bank = coreset
+        self.memory_bank = coreset.to(self.device)
 
         if verbose:
             reduction_pct = (1.0 - (coreset.shape[0] / total_patches)) * 100.0
