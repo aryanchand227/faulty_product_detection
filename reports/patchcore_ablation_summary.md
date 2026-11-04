@@ -22,3 +22,4 @@
 
 4. **Scoring Function (Max vs Top-5 Mean):**
    - Top-5 mean patch distance matches single-pixel max score on benchmark AUROC while improving speed (37.1 ms) and providing robustness against dead pixels or isolated sensor noise in industrial production environments.
+

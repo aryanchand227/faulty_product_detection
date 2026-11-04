@@ -183,13 +183,41 @@ def compute_aupro(
     return float(np.clip(aupro, 0.0, 1.0))
 
 
+def calibrate_normal_threshold(
+    normal_scores: Union[List[float], np.ndarray],
+    target_fpr: float = 0.01
+) -> float:
+    """
+    Calibrates an operational decision threshold strictly on nominal (normal-only) data.
+    
+    Industrial Zero-Leakage Methodology:
+    Defect samples are assumed unavailable during commissioning. The threshold is established
+    at the (1.0 - target_fpr) percentile of nominal validation anomaly scores, guaranteeing
+    a controlled False Alarm Rate (FAR <= target_fpr).
+
+    Args:
+        normal_scores: Continuous anomaly scores computed on a nominal validation split.
+        target_fpr: Target allowable False Positive Rate (e.g. 0.01 for 1% false reject rate).
+
+    Returns:
+        float: Calibrated operational decision threshold.
+    """
+    scores = np.asarray(normal_scores, dtype=np.float32)
+    percentile = (1.0 - target_fpr) * 100.0
+    return float(np.percentile(scores, percentile))
+
+
 def find_optimal_threshold(
     y_true: Union[List[int], np.ndarray],
     y_scores: Union[List[float], np.ndarray],
     criterion: str = "f1"
 ) -> Tuple[float, float, float, float, Dict[str, int]]:
     """
-    Finds the optimal decision threshold and computes corresponding confusion matrix.
+    Finds the optimal decision threshold via post-hoc grid search across candidate percentiles.
+    
+    NOTE: When run directly on hold-out test predictions, the resulting F1 score represents
+    an empirical upper-bound (oracle threshold). For production deployment, thresholds must
+    be established using calibrate_normal_threshold() on nominal validation samples.
 
     Args:
         y_true: Binary ground-truth labels (0 or 1).

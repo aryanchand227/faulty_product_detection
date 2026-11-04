@@ -155,6 +155,15 @@ def test_find_optimal_threshold_separable():
     assert cm == {"tp": 2, "fp": 0, "tn": 2, "fn": 0}
 
 
+def test_calibrate_normal_threshold():
+    """Verify leak-free normal-only calibration sets threshold at targeted percentile."""
+    from src.evaluation.anomaly_metrics import calibrate_normal_threshold
+    normal_scores = np.linspace(1.0, 10.0, 100)  # 1.0 to 10.0
+    # 99th percentile of 1 to 10 should be close to 9.91
+    thresh = calibrate_normal_threshold(normal_scores, target_fpr=0.01)
+    assert 9.8 < thresh <= 10.0
+
+
 def test_anomaly_inferencer_triage_decision_and_overlay():
     """Verify PatchCoreInferencer produces valid triage decisions and visual overlays."""
     model = PatchCore(backbone_name="resnet18", device="cpu")
