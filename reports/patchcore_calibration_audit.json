@@ -1,0 +1,18 @@
+{
+  "tau_calib_99": 10.2176,
+  "tau_calib_95": 10.0584,
+  "tau_calib_max": 10.2842,
+  "val_mean": 9.6884,
+  "val_std": 0.2392,
+  "test_normal_max": 15.3652,
+  "test_defect_min": 18.1039,
+  "separation_gap": 2.7387,
+  "oracle_threshold": 15.3901,
+  "calib_test_f1": 0.863,
+  "confusion_matrix": {
+    "tp": 63,
+    "fp": 20,
+    "tn": 0,
+    "fn": 0
+  }
+}
