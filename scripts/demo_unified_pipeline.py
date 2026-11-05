@@ -86,7 +86,10 @@ def run_demo():
         print(f"     Total Latency         : {result.total_latency_ms:.1f} ms")
         if result.certificate:
             print(f"     Dominant Morphology   : {result.certificate.get('dominant_morphology')}")
-            print(f"     Audit Signature       : {result.certificate.get('sha256_audit_signature')[:24]}...")
+            print(f"     Max Defect Length     : {result.certificate.get('max_defect_length_mm', 0.0):.2f} mm")
+            print(f"     Area Reconciliation   : Total={result.certificate.get('total_defect_area_mm2', 0.0)} mm², Components={result.certificate.get('component_defect_area_mm2', 0.0)} mm², Noise={result.certificate.get('filtered_noise_area_mm2', 0.0)} mm² (Reconciled: {result.certificate.get('is_area_reconciled')})")
+            print(f"     HMAC-SHA256 Signature : {result.certificate.get('hmac_sha256_signature')[:24]}...")
+            print(f"     Integrity Hash        : {result.certificate.get('sha256_integrity_hash')[:24]}...")
         print(f"     Rationale             : {result.verdict.engineering_rationale}")
 
         # Save Certificate to reports/certificates/

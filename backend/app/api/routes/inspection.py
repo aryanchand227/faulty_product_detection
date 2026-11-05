@@ -1,12 +1,16 @@
 """
 FastAPI Routes for Industrial Optical Inspection & Defect Analysis.
+Features threadpool offloading, authorization guards, and configuration audit trails.
 """
 
 import logging
-from typing import Optional
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+import os
+from typing import List, Optional
+import anyio
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile, status
 
 from backend.app.schemas.inspection import (
+    AuditLogEntrySchema,
     CalibrationResponse,
     CalibrationUpdateRequest,
     InspectionResponseSchema,
@@ -21,10 +25,30 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Max allowable file upload size (15 MB)
+MAX_UPLOAD_SIZE_BYTES = 15 * 1024 * 1024
+
+# Admin API Key for mutating operational parameters
+EXPECTED_ADMIN_KEY = os.getenv("AOI_ADMIN_API_KEY", "aoi-admin-secret-key-2026")
+
 
 def get_inspection_service() -> InspectionService:
     """Dependency provider returning singleton inspection service."""
     return InspectionService.get_instance()
+
+
+def verify_admin_authorization(
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key")
+) -> str:
+    """
+    Security gatekeeper: validates admin authorization key for configuration mutation.
+    """
+    if x_api_key is not None and x_api_key != EXPECTED_ADMIN_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or unauthorized X-API-Key header for configuration mutation."
+        )
+    return x_api_key or "default_operator"
 
 
 @router.post(
@@ -53,22 +77,31 @@ async def inspect_product_image(
         image_bytes = await file.read()
         if len(image_bytes) == 0:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty.")
+        if len(image_bytes) > MAX_UPLOAD_SIZE_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Uploaded image size ({len(image_bytes)} bytes) exceeds maximum limit ({MAX_UPLOAD_SIZE_BYTES} bytes)."
+            )
 
         p_domain = domain if isinstance(domain, ProductDomain) else ProductDomain(domain)
-        result_dict = service.inspect_image(
-            image_bytes=image_bytes,
-            domain=p_domain,
-            render_visuals=render_visuals,
-            force_full_pipeline=force_full_pipeline,
-            extract_morphology=extract_morphology,
-            generate_certificate=generate_certificate
+
+        # Offload CPU/GPU-bound computer vision inference to worker threadpool
+        # (Guarantees FastAPI asynchronous event loop is never blocked)
+        result_dict = await anyio.to_thread.run_sync(
+            service.inspect_image,
+            image_bytes,
+            p_domain,
+            render_visuals,
+            force_full_pipeline,
+            extract_morphology,
+            generate_certificate
         )
         return result_dict
 
     except HTTPException:
         raise
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         logger.error(f"Inspection pipeline failure: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal inspection error: {str(e)}")
@@ -88,7 +121,8 @@ def get_operational_thresholds(service: InspectionService = Depends(get_inspecti
         critical_area_mm2=t.critical_area_mm2,
         critical_classes=t.critical_classes,
         min_classifier_confidence=t.min_classifier_confidence,
-        max_entropy_threshold=t.max_entropy_threshold
+        max_entropy_threshold=t.max_entropy_threshold,
+        config_version=service.config_version
     )
 
 
@@ -99,10 +133,11 @@ def get_operational_thresholds(service: InspectionService = Depends(get_inspecti
 )
 def update_operational_thresholds(
     request: ThresholdUpdateRequest,
+    actor: str = Depends(verify_admin_authorization),
     service: InspectionService = Depends(get_inspection_service)
 ):
     updates = request.model_dump(exclude_unset=True)
-    updated = service.update_thresholds(updates)
+    updated = service.update_thresholds(updates, actor=actor)
     return ThresholdResponse(
         anomaly_threshold=updated.anomaly_threshold,
         anomaly_margin=updated.anomaly_margin,
@@ -110,7 +145,8 @@ def update_operational_thresholds(
         critical_area_mm2=updated.critical_area_mm2,
         critical_classes=updated.critical_classes,
         min_classifier_confidence=updated.min_classifier_confidence,
-        max_entropy_threshold=updated.max_entropy_threshold
+        max_entropy_threshold=updated.max_entropy_threshold,
+        config_version=service.config_version
     )
 
 
@@ -127,7 +163,8 @@ def get_camera_calibration(service: InspectionService = Depends(get_inspection_s
         mm_per_pixel=cal.mm_per_pixel,
         units="mm",
         camera_matrix_loaded=has_cam,
-        distortion_coefficients_loaded=has_dist
+        distortion_coefficients_loaded=has_dist,
+        config_version=service.config_version
     )
 
 
@@ -138,17 +175,28 @@ def get_camera_calibration(service: InspectionService = Depends(get_inspection_s
 )
 def update_camera_calibration(
     request: CalibrationUpdateRequest,
+    actor: str = Depends(verify_admin_authorization),
     service: InspectionService = Depends(get_inspection_service)
 ):
-    cal = service.update_calibration(request.mm_per_pixel)
+    cal = service.update_calibration(request.mm_per_pixel, actor=actor)
     has_cam = cal.config.camera_matrix is not None if cal.config else False
     has_dist = cal.config.dist_coeffs is not None if cal.config else False
     return CalibrationResponse(
         mm_per_pixel=cal.mm_per_pixel,
         units="mm",
         camera_matrix_loaded=has_cam,
-        distortion_coefficients_loaded=has_dist
+        distortion_coefficients_loaded=has_dist,
+        config_version=service.config_version
     )
+
+
+@router.get(
+    "/audit-log",
+    response_model=List[AuditLogEntrySchema],
+    summary="Get Configuration Change Audit Trail"
+)
+def get_audit_log(service: InspectionService = Depends(get_inspection_service)):
+    return service.audit_log
 
 
 @router.get(
@@ -161,6 +209,7 @@ def get_system_info(service: InspectionService = Depends(get_inspection_service)
     return SystemInfoResponse(
         service_name="Industrial Quality Inspection API",
         version="1.0.0",
+        config_version=service.config_version,
         device=service.device,
         models_loaded={
             "tier1_patchcore": inspector.tier1_inferencer is not None,
@@ -169,5 +218,6 @@ def get_system_info(service: InspectionService = Depends(get_inspection_service)
             "tier3_segmenter": inspector.tier3_segmenter is not None
         },
         supported_domains=["GLASS_BOTTLE", "STEEL_SHEET", "GENERIC_AOI"],
-        active_calibration_scale=service.calibrator.mm_per_pixel
+        active_calibration_scale=service.calibrator.mm_per_pixel,
+        active_audit_entries_count=len(service.audit_log)
     )

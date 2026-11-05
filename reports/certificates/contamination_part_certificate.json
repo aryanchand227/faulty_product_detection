@@ -1,22 +1,32 @@
 {
-  "certificate_id": "CERT-20261105_100113-6698CF4B",
-  "timestamp_utc": "2026-11-05T10:01:13.047897+00:00",
+  "certificate_id": "CERT-20261105_190524-4FD48D87",
+  "timestamp_utc": "2026-11-05T19:05:24.332401+00:00",
   "product_domain": "GLASS_BOTTLE",
-  "source_image_hash": "6698cf4bac4fba5a24d4e947ff641f4237f676e9f3695af729dc128a1942224e",
+  "config_version": "CFG-v1.0.0",
+  "source_image_hash": "4fd48d87a2d3b8351ecc05a11db0f677dea7bd55b6ca9dfaa09ffcdc0f609dc5",
   "decision": "FAIL",
   "severity": "CRITICAL",
   "routing_action": "AUTOMATIC_REJECT_BIN",
   "anomaly_score": 24.9932,
   "primary_defect_type": "glass_anomaly",
-  "dominant_morphology": "COMPACT_PIT",
+  "dominant_morphology": "GEOMETRIC_COMPACT_BLOB",
   "total_defect_area_mm2": 1835.168,
+  "component_defect_area_mm2": 1823.254,
+  "filtered_noise_area_mm2": 11.914,
+  "is_area_reconciled": true,
   "max_single_defect_area_mm2": 1805.704,
+  "max_defect_length_mm": 57.92,
   "measurement_mode": "projected_sensor_plane",
   "num_defect_components": 2,
   "zone_summary": {
+    "NECK_SHOULDER": {
+      "count": 1,
+      "total_area_mm2": 1805.704,
+      "risk_weight": 1.5
+    },
     "BODY_SIDEWALL": {
-      "count": 2,
-      "total_area_mm2": 1823.254,
+      "count": 1,
+      "total_area_mm2": 17.55,
       "risk_weight": 1.0
     }
   },
@@ -39,15 +49,23 @@
       ],
       "aspect_ratio": 1.37,
       "circularity": 0.76,
+      "is_shape_reliable": true,
       "solidity": 0.978,
       "compactness": 16.53,
       "extent": 0.647,
       "equivalent_diameter_mm": 47.95,
-      "morphology_type": "COMPACT_PIT",
-      "spatial_zone": "BODY_SIDEWALL",
-      "zone_risk_weight": 1.0,
+      "major_axis_length_mm": 57.92,
+      "max_feret_diameter_mm": 62.22,
+      "morphology_type": "GEOMETRIC_COMPACT_BLOB",
+      "spatial_zone": "NECK_SHOULDER",
+      "zone_overlaps": {
+        "NECK_SHOULDER": 0.183,
+        "BODY_SIDEWALL": 0.817
+      },
+      "zone_risk_weight": 1.5,
       "morphology_risk_weight": 1.0,
-      "adjusted_severity_score": 1805.7
+      "heuristic_severity_score": 2708.56,
+      "adjusted_severity_score": 2708.56
     },
     {
       "contour_id": 1,
@@ -67,18 +85,27 @@
       ],
       "aspect_ratio": 1.05,
       "circularity": 0.848,
+      "is_shape_reliable": true,
       "solidity": 0.977,
       "compactness": 14.83,
       "extent": 0.62,
       "equivalent_diameter_mm": 4.73,
-      "morphology_type": "COMPACT_PIT",
+      "major_axis_length_mm": 4.67,
+      "max_feret_diameter_mm": 5.43,
+      "morphology_type": "GEOMETRIC_COMPACT_BLOB",
       "spatial_zone": "BODY_SIDEWALL",
+      "zone_overlaps": {
+        "BODY_SIDEWALL": 1.0
+      },
       "zone_risk_weight": 1.0,
       "morphology_risk_weight": 1.0,
+      "heuristic_severity_score": 17.55,
       "adjusted_severity_score": 17.55
     }
   ],
   "engineering_rationale": "Product REJECTED: Severe anomaly score (24.99) exceeds upper margin (17.05).; Calibrated physical damaged area (1835.17 mm\u00b2) exceeds critical limit (25.00 mm\u00b2). Routing command: AUTOMATIC_REJECT_BIN (pneumatic diverter ejection).",
   "calibration_scale_mm_per_pixel": 0.15,
-  "sha256_audit_signature": "1fbaf7ad1dacfb0759126069b368d58cdad97a388800a068fb2b0cb60eb10f9d"
+  "sha256_integrity_hash": "8bf862a95ef3a325c69ae957894a401fc63b2c281454de1eabf46b7a3e7548ca",
+  "hmac_sha256_signature": "f9fd5127bb5a6b149b00652f6d837bc8742d663439fdb1d83cdf3899147c7919",
+  "sha256_audit_signature": "f9fd5127bb5a6b149b00652f6d837bc8742d663439fdb1d83cdf3899147c7919"
 }

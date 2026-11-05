@@ -1,15 +1,16 @@
 """
 Inspection Service managing the UnifiedQualityInspector instance,
-dynamic calibration adjustments, and REST API payload synthesis.
+thread-safe configuration snapshots, audit logging, and REST API payload synthesis.
 """
 
 import base64
+from datetime import datetime, timezone
 import io
 import logging
+import threading
 from typing import Any, Dict, List, Optional
 import cv2
 import numpy as np
-from PIL import Image
 
 from src.inspection.camera_calibration import CameraCalibrator
 from src.inspection.decision_engine import DecisionEngine, QualityThresholds
@@ -20,10 +21,12 @@ logger = logging.getLogger(__name__)
 
 class InspectionService:
     """
-    Singleton service maintaining the active UnifiedQualityInspector instance for the API.
+    Singleton service maintaining the active UnifiedQualityInspector instance,
+    thread-safe configuration snapshots, and mutation audit logs for the API.
     """
 
     _instance: Optional["InspectionService"] = None
+    _lock = threading.Lock()
 
     def __init__(self, inspector: Optional[UnifiedQualityInspector] = None):
         self.device = "cpu"
@@ -36,10 +39,13 @@ class InspectionService:
         )
         self.decision_engine = DecisionEngine(thresholds=self.thresholds)
 
+        # Configuration versioning and audit trail
+        self.config_version_seq = 0
+        self.audit_log: List[Dict[str, Any]] = []
+
         if inspector is not None:
             self.inspector = inspector
         else:
-            # Initialize with default/fallback inspector
             self.inspector = UnifiedQualityInspector(
                 domain=ProductDomain.GLASS_BOTTLE,
                 calibrator=self.calibrator,
@@ -48,33 +54,82 @@ class InspectionService:
                 device=self.device
             )
 
+    @property
+    def config_version(self) -> str:
+        return f"CFG-v1.0.{self.config_version_seq}"
+
     @classmethod
     def get_instance(cls) -> "InspectionService":
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = cls()
+            return cls._instance
 
     @classmethod
     def set_instance(cls, service: "InspectionService") -> None:
-        cls._instance = service
+        with cls._lock:
+            cls._instance = service
 
-    def update_thresholds(self, updates: Dict[str, Any]) -> QualityThresholds:
-        """Dynamically modifies operational quality thresholds."""
-        current_dict = self.thresholds.to_dict()
-        for k, v in updates.items():
-            if v is not None and k in current_dict:
-                current_dict[k] = v
+    def update_thresholds(
+        self,
+        updates: Dict[str, Any],
+        actor: str = "authorized_operator"
+    ) -> QualityThresholds:
+        """
+        Dynamically modifies operational quality thresholds, appends to the audit trail,
+        and increments the configuration version.
+        """
+        with self._lock:
+            current_dict = self.thresholds.to_dict()
+            changed = {}
+            for k, v in updates.items():
+                if v is not None and k in current_dict:
+                    if current_dict[k] != v:
+                        changed[k] = {"old": current_dict[k], "new": v}
+                        current_dict[k] = v
 
-        self.thresholds = QualityThresholds(**current_dict)
-        self.decision_engine.thresholds = self.thresholds
-        self.inspector.decision_engine = self.decision_engine
-        return self.thresholds
+            self.thresholds = QualityThresholds(**current_dict)
+            self.decision_engine.thresholds = self.thresholds
+            self.inspector.decision_engine = self.decision_engine
 
-    def update_calibration(self, mm_per_pixel: float) -> CameraCalibrator:
-        """Dynamically updates metric camera scaling factor."""
-        self.calibrator = CameraCalibrator(mm_per_pixel=mm_per_pixel)
-        self.inspector.calibrator = self.calibrator
-        return self.calibrator
+            self.config_version_seq += 1
+            now_iso = datetime.now(timezone.utc).isoformat()
+            self.audit_log.append({
+                "timestamp_utc": now_iso,
+                "actor": actor,
+                "action": "UPDATE_THRESHOLDS",
+                "changed_parameters": changed,
+                "config_version": self.config_version
+            })
+
+            logger.info(f"Thresholds updated to {self.config_version} by {actor}: {changed}")
+            return self.thresholds
+
+    def update_calibration(
+        self,
+        mm_per_pixel: float,
+        actor: str = "authorized_operator"
+    ) -> CameraCalibrator:
+        """
+        Dynamically updates metric camera scaling factor and logs audit record.
+        """
+        with self._lock:
+            old_scale = self.calibrator.mm_per_pixel
+            self.calibrator = CameraCalibrator(mm_per_pixel=mm_per_pixel)
+            self.inspector.calibrator = self.calibrator
+
+            self.config_version_seq += 1
+            now_iso = datetime.now(timezone.utc).isoformat()
+            self.audit_log.append({
+                "timestamp_utc": now_iso,
+                "actor": actor,
+                "action": "UPDATE_CALIBRATION",
+                "changed_parameters": {"mm_per_pixel": {"old": old_scale, "new": mm_per_pixel}},
+                "config_version": self.config_version
+            })
+
+            logger.info(f"Calibration updated to {self.config_version} by {actor}: {old_scale} -> {mm_per_pixel}")
+            return self.calibrator
 
     def inspect_image(
         self,
@@ -86,17 +141,27 @@ class InspectionService:
         generate_certificate: bool = True
     ) -> Dict[str, Any]:
         """
-        Executes end-to-end inspection on uploaded image bytes and returns structured dictionary.
+        Executes end-to-end inspection on uploaded image bytes with configuration snapshotting.
         """
         # Decode image from raw bytes
         np_arr = np.frombuffer(image_bytes, np.uint8)
         img_bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
         if img_bgr is None:
-            raise ValueError("Failed to decode image from provided byte stream.")
+            raise ValueError("Failed to decode image from provided byte stream. File may be corrupted or malformed.")
+
+        img_h, img_w = img_bgr.shape[:2]
+        if img_h < 16 or img_w < 16:
+            raise ValueError(f"Image dimensions ({img_w}x{img_h}) are below minimum inspection resolution (16x16).")
+        if img_h > 4096 or img_w > 4096:
+            raise ValueError(f"Image dimensions ({img_w}x{img_h}) exceed maximum allowable resolution (4096x4096).")
+
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-        # Set domain for inspector
-        self.inspector.domain = domain
+        # Thread-safe snapshot: Capture active configuration version for this inspection execution
+        with self._lock:
+            active_cfg_version = self.config_version
+            # Set domain for active run
+            self.inspector.domain = domain
 
         result: UnifiedInspectionResult = self.inspector.inspect(
             image_input=img_rgb,
@@ -107,6 +172,10 @@ class InspectionService:
         )
 
         res_dict = result.to_dict()
+
+        # If a certificate was generated, ensure config_version is stamped
+        if res_dict.get("certificate"):
+            res_dict["certificate"]["config_version"] = active_cfg_version
 
         # Encode annotated visual overlay to Base64 PNG if rendered
         if result.annotated_image is not None and render_visuals:

@@ -1,8 +1,9 @@
 {
-  "certificate_id": "CERT-20261105_100110-EBF06437",
-  "timestamp_utc": "2026-11-05T10:01:10.211208+00:00",
+  "certificate_id": "CERT-20261105_190520-7F31981A",
+  "timestamp_utc": "2026-11-05T19:05:20.973961+00:00",
   "product_domain": "GLASS_BOTTLE",
-  "source_image_hash": "ebf0643731c8c2c11372516becceb62f414c4a51dbe37a4cbd31dab7ed95e775",
+  "config_version": "CFG-v1.0.0",
+  "source_image_hash": "7f31981a1ad0e51619a25b3e3f86004e5dab08220d4e56d82a8b475d0fcf0a6d",
   "decision": "PASS",
   "severity": "NONE",
   "routing_action": "LINE_CONTINUE",
@@ -10,12 +11,18 @@
   "primary_defect_type": "nominal",
   "dominant_morphology": "NONE",
   "total_defect_area_mm2": 0.0,
+  "component_defect_area_mm2": 0.0,
+  "filtered_noise_area_mm2": 0.0,
+  "is_area_reconciled": true,
   "max_single_defect_area_mm2": 0.0,
+  "max_defect_length_mm": 0.0,
   "measurement_mode": "projected_sensor_plane",
   "num_defect_components": 0,
   "zone_summary": {},
   "defect_components": [],
   "engineering_rationale": "Tier 1 Gatekeeper PASSED: Anomaly score 11.80 is well below threshold 15.50 (safety margin 13.95). Clean nominal surface.",
   "calibration_scale_mm_per_pixel": 0.15,
-  "sha256_audit_signature": "8d7f891191f2cc9bf76016641bbe590a512e4bfedbd773a0f89771f4aeee7f6d"
+  "sha256_integrity_hash": "1c8cd5cc9c373d16c60f7a1855c56a56707da7a0eb6aa3c3ef20d6ac8a1bb959",
+  "hmac_sha256_signature": "aeae8902b79129b95d0919d5d2682cfe15f93b9888a6272244593c1529c0f9ea",
+  "sha256_audit_signature": "aeae8902b79129b95d0919d5d2682cfe15f93b9888a6272244593c1529c0f9ea"
 }

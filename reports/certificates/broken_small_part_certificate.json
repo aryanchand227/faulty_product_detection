@@ -1,16 +1,21 @@
 {
-  "certificate_id": "CERT-20261105_100111-2BA137FD",
-  "timestamp_utc": "2026-11-05T10:01:11.169350+00:00",
+  "certificate_id": "CERT-20261105_190522-83E611FB",
+  "timestamp_utc": "2026-11-05T19:05:22.110976+00:00",
   "product_domain": "GLASS_BOTTLE",
-  "source_image_hash": "2ba137fd6378c380208281a82d2c2addc671c20a9b2c001a6601ec1a19f953c7",
+  "config_version": "CFG-v1.0.0",
+  "source_image_hash": "83e611fbfc77063423fdd30cb5fd99096f1862ac9f668ffc8213f781698b11ee",
   "decision": "FAIL",
   "severity": "CRITICAL",
   "routing_action": "AUTOMATIC_REJECT_BIN",
   "anomaly_score": 20.1371,
   "primary_defect_type": "glass_anomaly",
-  "dominant_morphology": "COMPACT_PIT",
+  "dominant_morphology": "GEOMETRIC_COMPACT_BLOB",
   "total_defect_area_mm2": 284.4,
+  "component_defect_area_mm2": 280.282,
+  "filtered_noise_area_mm2": 4.118,
+  "is_area_reconciled": true,
   "max_single_defect_area_mm2": 280.282,
+  "max_defect_length_mm": 19.65,
   "measurement_mode": "projected_sensor_plane",
   "num_defect_components": 1,
   "zone_summary": {
@@ -39,18 +44,27 @@
       ],
       "aspect_ratio": 1.1,
       "circularity": 0.886,
+      "is_shape_reliable": true,
       "solidity": 0.991,
       "compactness": 14.18,
       "extent": 0.786,
       "equivalent_diameter_mm": 18.89,
-      "morphology_type": "COMPACT_PIT",
+      "major_axis_length_mm": 19.65,
+      "max_feret_diameter_mm": 20.89,
+      "morphology_type": "GEOMETRIC_COMPACT_BLOB",
       "spatial_zone": "BODY_SIDEWALL",
+      "zone_overlaps": {
+        "BODY_SIDEWALL": 1.0
+      },
       "zone_risk_weight": 1.0,
       "morphology_risk_weight": 1.0,
+      "heuristic_severity_score": 280.28,
       "adjusted_severity_score": 280.28
     }
   ],
   "engineering_rationale": "Product REJECTED: Severe anomaly score (20.14) exceeds upper margin (17.05).; Calibrated physical damaged area (284.40 mm\u00b2) exceeds critical limit (25.00 mm\u00b2). Routing command: AUTOMATIC_REJECT_BIN (pneumatic diverter ejection).",
   "calibration_scale_mm_per_pixel": 0.15,
-  "sha256_audit_signature": "56365f1546d4cf92faee63bd2f1340337c357a5622557350d51255388b5653fc"
+  "sha256_integrity_hash": "062d119264daca2fa43701b1bba99b01d2a1b68e7e3ed6a6d847f60e45ea75d8",
+  "hmac_sha256_signature": "6a450eac99305e8fb43b185556f2b0bc429f66912813dc521f9fee0f52ffbef6",
+  "sha256_audit_signature": "6a450eac99305e8fb43b185556f2b0bc429f66912813dc521f9fee0f52ffbef6"
 }

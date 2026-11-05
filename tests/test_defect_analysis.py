@@ -1,7 +1,9 @@
 """
-Unit tests for Defect Morphology Analysis and Structured Inspection Reporting.
+Unit tests for Defect Morphology Analysis, Multi-Zone Overlap, Area Reconciliation,
+and HMAC-SHA256 Cryptographic Authentication.
 """
 
+import hmac
 import hashlib
 import json
 import math
@@ -25,6 +27,7 @@ from src.inspection.defect_analysis import (
     SpatialZone,
     ZONE_RISK_MULTIPLIERS,
     MORPHOLOGY_RISK_MULTIPLIERS,
+    DEFAULT_HMAC_SECRET,
 )
 from src.inspection.unified_pipeline import ProductDomain, UnifiedInspectionResult
 from src.inference.anomaly_inference import AnomalyInspectionResponse
@@ -60,7 +63,7 @@ def create_synthetic_c_shape(img_size: int = 200) -> np.ndarray:
 
 
 def test_morphology_circular_pit():
-    """Validates that a round circular contour is classified as COMPACT_PIT with high circularity and solidity."""
+    """Validates that a round circular contour is classified as GEOMETRIC_COMPACT_BLOB."""
     mask = create_synthetic_circle(radius=25, img_size=200)
     analyzer = DefectMorphologyAnalyzer(min_contour_area_px=10)
     features = analyzer.analyze_mask(mask, mm_per_pixel=0.10, domain=ProductDomain.GLASS_BOTTLE)
@@ -68,18 +71,21 @@ def test_morphology_circular_pit():
     assert len(features) == 1
     f = features[0]
 
-    # Circularity for circle should be high (>= 0.80 on discrete grid)
+    # Circularity for circle should be high (>= 0.75 on discrete grid)
     assert f.circularity >= 0.75
-    # Solidity should be ~1.0 (convex)
     assert f.solidity >= 0.90
-    # Aspect ratio should be ~1.0
     assert 1.0 <= f.aspect_ratio <= 1.4
-    assert f.morphology_type == MorphologyType.COMPACT_PIT_OR_INCLUSION
+    assert f.is_shape_reliable is True
+    assert f.morphology_type == MorphologyType.GEOMETRIC_COMPACT_BLOB
     assert f.equivalent_diameter_mm > 0.0
+    assert f.major_axis_length_mm > 0.0
 
 
-def test_morphology_filamentary_crack():
-    """Validates that an elongated slit contour is classified as FILAMENTARY_CRACK with high aspect ratio."""
+def test_morphology_filamentary_crack_major_axis():
+    """
+    Validates that an elongated slit contour is classified as GEOMETRIC_ELONGATED_SLIT
+    and that major_axis_length_mm reveals true crack length while equivalent_diameter conceals it.
+    """
     mask = create_synthetic_crack(length=90, thickness=3, img_size=200)
     analyzer = DefectMorphologyAnalyzer(min_contour_area_px=10)
     features = analyzer.analyze_mask(mask, mm_per_pixel=0.10, domain=ProductDomain.GLASS_BOTTLE)
@@ -87,12 +93,31 @@ def test_morphology_filamentary_crack():
     assert len(features) == 1
     f = features[0]
 
-    # High aspect ratio
     assert f.aspect_ratio >= 5.0
-    # Low circularity
     assert f.circularity <= 0.35
-    assert f.morphology_type == MorphologyType.FILAMENTARY_CRACK
-    assert f.morphology_risk_weight == MORPHOLOGY_RISK_MULTIPLIERS[MorphologyType.FILAMENTARY_CRACK]
+    assert f.morphology_type == MorphologyType.GEOMETRIC_ELONGATED_SLIT
+    assert f.morphology_risk_weight == MORPHOLOGY_RISK_MULTIPLIERS[MorphologyType.GEOMETRIC_ELONGATED_SLIT]
+
+    # Major axis length (~9.0 mm at 0.10 mm/px) must accurately represent crack length
+    assert 8.0 <= f.major_axis_length_mm <= 10.0
+    # Equivalent diameter is much smaller (~1.8 mm), demonstrating why reporting major axis is critical
+    assert f.equivalent_diameter_mm < 3.0
+    assert f.major_axis_length_mm > f.equivalent_diameter_mm * 2.5
+
+
+def test_morphology_small_defect_rasterization_bias_flag():
+    """Validates that a tiny defect (<25 pixels) is flagged with is_shape_reliable=False."""
+    mask = np.zeros((100, 100), dtype=np.uint8)
+    # 5x5 square: polygon area = 16 pixels (between min_contour_area 10 and reliable 25)
+    mask[40:45, 40:45] = 255
+
+    analyzer = DefectMorphologyAnalyzer(min_contour_area_px=10, min_reliable_area_px=25)
+    features = analyzer.analyze_mask(mask, mm_per_pixel=0.10, domain=ProductDomain.GLASS_BOTTLE)
+
+    assert len(features) == 1
+    f = features[0]
+    assert 10 <= f.area_pixels < 25
+    assert f.is_shape_reliable is False  # Discrete grid rasterization bias flag active
 
 
 def test_morphology_diffuse_non_convex():
@@ -103,9 +128,8 @@ def test_morphology_diffuse_non_convex():
 
     assert len(features) == 1
     f = features[0]
-    # Low solidity because convex hull covers the hollow gap
     assert f.solidity <= 0.65
-    assert f.morphology_type in (MorphologyType.DIFFUSE_CONTAMINATION, MorphologyType.IRREGULAR_BLEMISH)
+    assert f.morphology_type in (MorphologyType.GEOMETRIC_DIFFUSE_CLUSTER, MorphologyType.GEOMETRIC_IRREGULAR)
 
 
 def test_spatial_zoning_glass_bottle():
@@ -134,6 +158,36 @@ def test_spatial_zoning_glass_bottle():
     assert f_base.zone_risk_weight == 2.0
 
 
+def test_multi_zone_overlap_highest_risk_touched():
+    """
+    CRITICAL AUDIT TEST: Verifies that a defect spanning the boundary between
+    SEALING_RIM (y < 32) and NECK_SHOULDER (y >= 32) whose centroid falls in NECK_SHOULDER
+    is assigned to SEALING_RIM under the highest-risk touched rule.
+    """
+    mask = np.zeros((200, 200), dtype=np.uint8)
+    # Defect extends from y=20 (in sealing rim) to y=55 (in neck/shoulder)
+    # Total height = 35 px. Sealing rim portion = 12 px (y=20 to 31). Neck portion = 23 px (y=32 to 55).
+    # Centroid is at y ~ 37.5 (in NECK_SHOULDER!)
+    mask[20:55, 95:105] = 255
+
+    analyzer = DefectMorphologyAnalyzer(min_contour_area_px=10)
+    features = analyzer.analyze_mask(mask, domain=ProductDomain.GLASS_BOTTLE)
+
+    assert len(features) == 1
+    f = features[0]
+    # Centroid is in neck/shoulder
+    assert f.centroid_xy[1] > 32.0
+
+    # BUT primary zone MUST be SEALING_RIM because it touches the sealing rim!
+    assert f.spatial_zone == SpatialZone.SEALING_RIM
+    assert f.zone_risk_weight == 2.5
+    # Overlap dictionary records both zones
+    assert "SEALING_RIM" in f.zone_overlaps
+    assert "NECK_SHOULDER" in f.zone_overlaps
+    assert f.zone_overlaps["SEALING_RIM"] > 0.0
+    assert f.zone_overlaps["NECK_SHOULDER"] > 0.0
+
+
 def test_spatial_zoning_steel_sheet():
     """Verifies lateral functional zoning on rolling steel strips."""
     analyzer = DefectMorphologyAnalyzer(min_contour_area_px=5)
@@ -153,8 +207,67 @@ def test_spatial_zoning_steel_sheet():
     assert f_center.zone_risk_weight == 1.0
 
 
-def test_inspection_certificate_generation_and_cryptographic_hash():
-    """Verifies that structured inspection certificates are generated with valid SHA-256 integrity signatures."""
+def test_area_reconciliation_consistency_invariant():
+    """
+    AUDIT TEST: Verifies area reconciliation invariant:
+    total_defect_area_mm2 == component_defect_area_mm2 + filtered_noise_area_mm2.
+    """
+    verdict = InspectionVerdict(
+        decision=InspectionDecision.FAIL,
+        severity=SeverityLevel.CRITICAL,
+        routing=RoutingAction.AUTOMATIC_REJECT_BIN,
+        primary_defect_type="broken_large",
+        confidence=0.98,
+        physical_defect_area_mm2=50.00,  # Total mask area
+        anomaly_score=26.50,
+        is_anomalous=True,
+        engineering_rationale="Defect area exceeds critical limit."
+    )
+    t1_response = AnomalyInspectionResponse(
+        decision="FAIL",
+        image_anomaly_score=26.50,
+        threshold=15.50,
+        is_anomalous=True,
+        defect_pixel_count=5000,
+        defect_area_ratio=0.05,
+        physical_defect_area_mm2=50.00,
+        inference_time_ms=25.0,
+        num_anomaly_regions=1,
+        regions=[]
+    )
+    res = UnifiedInspectionResult(
+        verdict=verdict,
+        tier1_anomaly=t1_response,
+        product_domain="GLASS_BOTTLE",
+        physical_metrics={"measurement_mode": "projected_sensor_plane", "scale_mm_per_pixel": 0.10},
+        total_latency_ms=28.4,
+        early_exit_applied=False
+    )
+
+    # Synthetic component with 40.0 mm2 area (leaving 10.0 mm2 as filtered noise)
+    mask = create_synthetic_circle(radius=20, img_size=100)
+    analyzer = DefectMorphologyAnalyzer()
+    features = analyzer.analyze_mask(mask, mm_per_pixel=0.10, domain=ProductDomain.GLASS_BOTTLE)
+
+    cert = InspectionReportGenerator.generate_certificate(
+        inspection_result=res,
+        morphological_features=features,
+        config_version="CFG-v1.0.5"
+    )
+
+    # Check that area reconciliation is strictly verified
+    assert cert.is_area_reconciled is True
+    reconciled_sum = cert.component_defect_area_mm2 + cert.filtered_noise_area_mm2
+    assert abs(cert.total_defect_area_mm2 - reconciled_sum) < 0.002
+    assert cert.config_version == "CFG-v1.0.5"
+
+
+def test_hmac_sha256_authentication_and_tamper_detection():
+    """
+    CRITICAL AUDIT TEST: Verifies HMAC-SHA256 authentication.
+    Confirms that any post-generation modification of certificate fields
+    is immediately detected as unauthorized tampering.
+    """
     verdict = InspectionVerdict(
         decision=InspectionDecision.FAIL,
         severity=SeverityLevel.CRITICAL,
@@ -194,19 +307,23 @@ def test_inspection_certificate_generation_and_cryptographic_hash():
     cert = InspectionReportGenerator.generate_certificate(
         inspection_result=res,
         morphological_features=features,
-        source_image_bytes=b"synthetic_raw_image_bytes"
+        source_image_bytes=b"authentic_source_image_payload"
     )
 
-    assert cert.certificate_id.startswith("CERT-")
-    assert cert.decision == "FAIL"
-    assert cert.severity == "CRITICAL"
-    assert cert.routing_action == "AUTOMATIC_REJECT_BIN"
-    assert cert.dominant_morphology == MorphologyType.FILAMENTARY_CRACK.value
-    assert len(cert.sha256_audit_signature) == 64  # Valid 256-bit hex string
+    cert_dict = cert.to_dict()
 
-    # Verify JSON serialization and markdown rendering
-    cert_json = cert.to_json()
-    assert "sha256_audit_signature" in cert_json
-    cert_md = cert.to_markdown()
-    assert "INDUSTRIAL QUALITY INSPECTION CERTIFICATE" in cert_md
-    assert "AUTOMATIC_REJECT_BIN" in cert_md
+    # 1. Valid certificate verification
+    assert InspectionReportGenerator.verify_certificate(cert_dict) is True
+
+    # 2. Tampered certificate verification: modify verdict from FAIL to PASS
+    tampered_dict_1 = dict(cert_dict)
+    tampered_dict_1["decision"] = "PASS"
+    assert InspectionReportGenerator.verify_certificate(tampered_dict_1) is False
+
+    # 3. Tampered certificate verification: modify defect area from 45.2 to 0.0
+    tampered_dict_2 = dict(cert_dict)
+    tampered_dict_2["total_defect_area_mm2"] = 0.0
+    assert InspectionReportGenerator.verify_certificate(tampered_dict_2) is False
+
+    # 4. Tampered certificate verification: wrong secret key
+    assert InspectionReportGenerator.verify_certificate(cert_dict, hmac_secret=b"fraudulent-key") is False
