@@ -73,3 +73,8 @@ frontend/.env
 *.pem
 *.key
 secrets/
+
+# Database and runtime media
+data/*.db
+data/inspection_media/
+!data/.gitkeep
