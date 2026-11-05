@@ -84,6 +84,8 @@ class UnifiedInspectionResult:
     total_latency_ms: float = 0.0
     early_exit_applied: bool = False
     product_domain: str = "GLASS_BOTTLE"
+    morphological_features: List[Dict[str, Any]] = field(default_factory=list)
+    certificate: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Converts inspection result to structured dictionary payload."""
@@ -99,9 +101,12 @@ class UnifiedInspectionResult:
             "physical_metrics": self.physical_metrics,
             "total_latency_ms": self.total_latency_ms,
             "early_exit_applied": self.early_exit_applied,
-            "product_domain": self.product_domain
+            "product_domain": self.product_domain,
+            "morphological_features": self.morphological_features
         }
 
+        if self.certificate is not None:
+            data["certificate"] = self.certificate
         if self.tier2_classification is not None:
             data["tier2_classification"] = self.tier2_classification.to_dict()
         if self.tier3_detection is not None:
@@ -167,7 +172,9 @@ class UnifiedQualityInspector:
         self,
         image_input: Union[np.ndarray, Image.Image, str, Path],
         render_visuals: bool = True,
-        force_full_pipeline: bool = False
+        force_full_pipeline: bool = False,
+        extract_morphology: bool = True,
+        generate_certificate: bool = True
     ) -> UnifiedInspectionResult:
         """
         Executes end-to-end industrial inspection on a product image.
@@ -176,6 +183,8 @@ class UnifiedQualityInspector:
             image_input: File path, PIL Image, or NumPy array.
             render_visuals: If True, renders annotated visual overlay with HUD banner.
             force_full_pipeline: If True, runs full diagnostic pipeline even if Tier 1 is nominal.
+            extract_morphology: If True, extracts granular shape metrics (circularity, solidity, aspect ratio, zoning).
+            generate_certificate: If True, generates a cryptographically hashed inspection certificate.
 
         Returns:
             UnifiedInspectionResult: Complete inspection telemetry and verdict.
@@ -227,7 +236,7 @@ class UnifiedQualityInspector:
                     latency_ms=total_elapsed
                 )
 
-            return UnifiedInspectionResult(
+            res = UnifiedInspectionResult(
                 verdict=verdict,
                 tier1_anomaly=t1_response,
                 tier2_classification=None,
@@ -242,8 +251,15 @@ class UnifiedQualityInspector:
                 annotated_image=annotated_img,
                 total_latency_ms=round(total_elapsed, 2),
                 early_exit_applied=True,
-                product_domain=self.domain.value
+                product_domain=self.domain.value,
+                morphological_features=[],
+                certificate=None
             )
+            if generate_certificate:
+                from src.inspection.defect_analysis import InspectionReportGenerator
+                cert = InspectionReportGenerator.generate_certificate(res, [])
+                res.certificate = cert.to_dict()
+            return res
 
         # =================================================================
         # DOMAIN-SPECIFIC DIAGNOSTIC ESCALATION
@@ -406,7 +422,20 @@ class UnifiedQualityInspector:
                 latency_ms=total_elapsed
             )
 
-        return UnifiedInspectionResult(
+        # Extract Morphological Shape Descriptors
+        morph_dict_list: List[Dict[str, Any]] = []
+        morph_obj_list = []
+        if extract_morphology and seg_mask is not None and np.count_nonzero(seg_mask) > 0:
+            from src.inspection.defect_analysis import DefectMorphologyAnalyzer
+            analyzer = DefectMorphologyAnalyzer()
+            morph_obj_list = analyzer.analyze_mask(
+                binary_mask=seg_mask,
+                mm_per_pixel=self.calibrator.mm_per_pixel,
+                domain=self.domain
+            )
+            morph_dict_list = [m.to_dict() for m in morph_obj_list]
+
+        res = UnifiedInspectionResult(
             verdict=verdict,
             tier1_anomaly=t1_response,
             tier2_classification=t2_response,
@@ -416,8 +445,17 @@ class UnifiedQualityInspector:
             annotated_image=annotated_img,
             total_latency_ms=round(total_elapsed, 2),
             early_exit_applied=False,
-            product_domain=self.domain.value
+            product_domain=self.domain.value,
+            morphological_features=morph_dict_list,
+            certificate=None
         )
+
+        if generate_certificate:
+            from src.inspection.defect_analysis import InspectionReportGenerator
+            cert = InspectionReportGenerator.generate_certificate(res, morph_obj_list)
+            res.certificate = cert.to_dict()
+
+        return res
 
     def _load_image_rgb(self, image_input: Union[np.ndarray, Image.Image, str, Path]) -> np.ndarray:
         """Utility ensuring standard uint8 RGB array format."""

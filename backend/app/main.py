@@ -22,6 +22,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from backend.app.api.routes import inspection
+app.include_router(inspection.router, prefix="/api/v1/inspect", tags=["Inspection"])
+
 class HealthResponse(BaseModel):
     status: str
     python_version: str

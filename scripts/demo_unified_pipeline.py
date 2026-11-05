@@ -84,7 +84,20 @@ def run_demo():
         print(f"     Projected Damage Area : {result.verdict.physical_defect_area_mm2:.2f} mm² ({result.physical_metrics['measurement_mode']})")
         print(f"     Early Exit Applied?   : {result.early_exit_applied}")
         print(f"     Total Latency         : {result.total_latency_ms:.1f} ms")
+        if result.certificate:
+            print(f"     Dominant Morphology   : {result.certificate.get('dominant_morphology')}")
+            print(f"     Audit Signature       : {result.certificate.get('sha256_audit_signature')[:24]}...")
         print(f"     Rationale             : {result.verdict.engineering_rationale}")
+
+        # Save Certificate to reports/certificates/
+        cert_dir = Path("reports/certificates")
+        cert_dir.mkdir(parents=True, exist_ok=True)
+        if result.certificate:
+            cert_file = cert_dir / f"{name}_certificate.json"
+            import json
+            with open(cert_file, "w") as f:
+                json.dump(result.certificate, f, indent=2)
+            print(f"     Saved Certificate     : {cert_file}")
 
         # Save annotated HUD image
         if result.annotated_image is not None:

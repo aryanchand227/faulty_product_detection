@@ -1,0 +1,56 @@
+{
+  "certificate_id": "CERT-20261105_100111-2BA137FD",
+  "timestamp_utc": "2026-11-05T10:01:11.169350+00:00",
+  "product_domain": "GLASS_BOTTLE",
+  "source_image_hash": "2ba137fd6378c380208281a82d2c2addc671c20a9b2c001a6601ec1a19f953c7",
+  "decision": "FAIL",
+  "severity": "CRITICAL",
+  "routing_action": "AUTOMATIC_REJECT_BIN",
+  "anomaly_score": 20.1371,
+  "primary_defect_type": "glass_anomaly",
+  "dominant_morphology": "COMPACT_PIT",
+  "total_defect_area_mm2": 284.4,
+  "max_single_defect_area_mm2": 280.282,
+  "measurement_mode": "projected_sensor_plane",
+  "num_defect_components": 1,
+  "zone_summary": {
+    "BODY_SIDEWALL": {
+      "count": 1,
+      "total_area_mm2": 280.282,
+      "risk_weight": 1.0
+    }
+  },
+  "defect_components": [
+    {
+      "contour_id": 1,
+      "area_pixels": 12457,
+      "physical_area_mm2": 280.282,
+      "perimeter_pixels": 420.3,
+      "physical_perimeter_mm": 63.05,
+      "bounding_box_xywh": [
+        208,
+        518,
+        120,
+        132
+      ],
+      "centroid_xy": [
+        268.8,
+        584.0
+      ],
+      "aspect_ratio": 1.1,
+      "circularity": 0.886,
+      "solidity": 0.991,
+      "compactness": 14.18,
+      "extent": 0.786,
+      "equivalent_diameter_mm": 18.89,
+      "morphology_type": "COMPACT_PIT",
+      "spatial_zone": "BODY_SIDEWALL",
+      "zone_risk_weight": 1.0,
+      "morphology_risk_weight": 1.0,
+      "adjusted_severity_score": 280.28
+    }
+  ],
+  "engineering_rationale": "Product REJECTED: Severe anomaly score (20.14) exceeds upper margin (17.05).; Calibrated physical damaged area (284.40 mm\u00b2) exceeds critical limit (25.00 mm\u00b2). Routing command: AUTOMATIC_REJECT_BIN (pneumatic diverter ejection).",
+  "calibration_scale_mm_per_pixel": 0.15,
+  "sha256_audit_signature": "56365f1546d4cf92faee63bd2f1340337c357a5622557350d51255388b5653fc"
+}

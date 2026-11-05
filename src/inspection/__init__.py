@@ -23,6 +23,16 @@ from src.inspection.unified_pipeline import (
     UnifiedInspectionResult,
     UnifiedQualityInspector,
 )
+from src.inspection.defect_analysis import (
+    DefectMorphologyAnalyzer,
+    InspectionCertificate,
+    InspectionReportGenerator,
+    MorphologicalFeatures,
+    MorphologyType,
+    SpatialZone,
+    ZONE_RISK_MULTIPLIERS,
+    MORPHOLOGY_RISK_MULTIPLIERS,
+)
 
 __all__ = [
     "CameraCalibrationConfig",
@@ -38,5 +48,13 @@ __all__ = [
     "ProductDomain",
     "UnifiedInspectionResult",
     "UnifiedQualityInspector",
+    "DefectMorphologyAnalyzer",
+    "InspectionCertificate",
+    "InspectionReportGenerator",
+    "MorphologicalFeatures",
+    "MorphologyType",
+    "SpatialZone",
+    "ZONE_RISK_MULTIPLIERS",
+    "MORPHOLOGY_RISK_MULTIPLIERS",
 ]
 
