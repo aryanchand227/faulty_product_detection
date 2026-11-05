@@ -287,3 +287,4 @@ class InspectionVisualizer:
         dashboard = np.vstack([top_row, bottom_row])
 
         return dashboard
+

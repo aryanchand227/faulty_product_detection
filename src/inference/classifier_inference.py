@@ -201,3 +201,4 @@ class ClassifierInferencer:
             entropy=round(entropy, 4),
             inference_time_ms=round(elapsed_ms, 2)
         )
+

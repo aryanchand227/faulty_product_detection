@@ -19,6 +19,7 @@ from src.inspection.visualizer import (
     STATUS_COLORS_RGB,
 )
 from src.inspection.unified_pipeline import (
+    ProductDomain,
     UnifiedInspectionResult,
     UnifiedQualityInspector,
 )
@@ -34,6 +35,8 @@ __all__ = [
     "SeverityLevel",
     "InspectionVisualizer",
     "STATUS_COLORS_RGB",
+    "ProductDomain",
     "UnifiedInspectionResult",
     "UnifiedQualityInspector",
 ]
+

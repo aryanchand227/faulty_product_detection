@@ -1,15 +1,28 @@
 """
 Unified Multi-Tier Industrial Quality Inspection Pipeline.
 
-Orchestrates the complete industrial vision pipeline across three specialized tiers:
+Orchestrates the industrial vision pipeline across three specialized tiers:
 - Tier 1: Unsupervised Anomaly Gatekeeper (PatchCore)
 - Tier 2: Multi-Class Defect Classifier (ResNet-18 / EfficientNet-B0)
 - Tier 3: Spatial Defect Localizer (Ultralytics YOLOv8 Bounding Boxes + PyTorch U-Net Segmentation)
-- Camera Calibration: Metric physical dimension transformation (mm and mm²)
+- Camera Calibration: Metric dimension transformation (mm and mm²)
 - Decision Engine: Multi-factor operational triage (PASS / REVIEW / FAIL) and pneumatic diverter routing
+
+Product Domain Separation:
+--------------------------
+1. GLASS_BOTTLE (MVTec AD Bottle Domain):
+   - 3D curved geometry: Optical surface area is estimated projected sensor-plane area.
+   - Tier 1 PatchCore is the primary gatekeeper and localization engine (0.9848 Pixel AUROC).
+   - Prevents domain leakage by withholding steel-trained supervised classifiers from glass containers.
+2. STEEL_SHEET (NEU-DET Steel Surface Domain):
+   - Flat planar geometry: Planar metric scaling (Area = px * s^2) is mathematically rigorous.
+   - Tier 2 Classifier + Tier 3 YOLO / U-Net localize and categorize steel defects.
+3. GENERIC_AOI:
+   - Configurable multi-tier inspection for general manufacturing lines.
 """
 
 from dataclasses import asdict, dataclass, field
+from enum import Enum
 import logging
 from pathlib import Path
 import time
@@ -21,8 +34,8 @@ from PIL import Image
 
 from src.inference.anomaly_inference import AnomalyInspectionResponse, PatchCoreInferencer
 from src.inference.classifier_inference import ClassifierInferencer, DefectClassificationResponse
-from src.inference.detector_inference import DetectionResponse, YOLODetector
-from src.inference.segmenter_inference import SegmentationResponse, UNetSegmenter
+from src.inference.detector_inference import DetectionBox, DetectionResponse, YOLODetector
+from src.inference.segmenter_inference import DefectComponent, SegmentationResponse, UNetSegmenter
 from src.inspection.camera_calibration import CameraCalibrationConfig, CameraCalibrator
 from src.inspection.decision_engine import (
     DecisionEngine,
@@ -37,6 +50,13 @@ from src.inspection.visualizer import InspectionVisualizer
 logger = logging.getLogger(__name__)
 
 
+class ProductDomain(str, Enum):
+    """Product domain configuration defining valid model combinations."""
+    GLASS_BOTTLE = "GLASS_BOTTLE"        # 3D curved glassware (MVTec AD Bottle)
+    STEEL_SHEET = "STEEL_SHEET"          # Flat planar steel strip (NEU-DET)
+    GENERIC_AOI = "GENERIC_AOI"          # General optical inspection
+
+
 @dataclass
 class UnifiedInspectionResult:
     """
@@ -48,10 +68,11 @@ class UnifiedInspectionResult:
         tier2_classification: Optional defect categorization results from classifier
         tier3_detection: Optional bounding boxes from YOLO detector
         tier3_segmentation: Optional pixel segmentation masks from U-Net
-        physical_metrics: Calibrated real-world damage dimensions in mm and mm²
+        physical_metrics: Calibrated damage dimensions in mm and mm²
         annotated_image: Optional RGB image with multi-tier annotations and industrial HUD banner
         total_latency_ms: Total end-to-end wall-clock inspection time in milliseconds
-        early_exit_applied: True if Tier 1 gatekeeper bypassed Tiers 2 & 3 for nominal speedup
+        early_exit_applied: True if Tier 1 gatekeeper bypassed downstream heads for nominal speedup
+        product_domain: Domain under which inspection was performed
     """
     verdict: InspectionVerdict
     tier1_anomaly: AnomalyInspectionResponse
@@ -62,6 +83,7 @@ class UnifiedInspectionResult:
     annotated_image: Optional[np.ndarray] = None
     total_latency_ms: float = 0.0
     early_exit_applied: bool = False
+    product_domain: str = "GLASS_BOTTLE"
 
     def to_dict(self) -> Dict[str, Any]:
         """Converts inspection result to structured dictionary payload."""
@@ -76,7 +98,8 @@ class UnifiedInspectionResult:
             },
             "physical_metrics": self.physical_metrics,
             "total_latency_ms": self.total_latency_ms,
-            "early_exit_applied": self.early_exit_applied
+            "early_exit_applied": self.early_exit_applied,
+            "product_domain": self.product_domain
         }
 
         if self.tier2_classification is not None:
@@ -96,6 +119,7 @@ class UnifiedQualityInspector:
 
     def __init__(
         self,
+        domain: ProductDomain = ProductDomain.GLASS_BOTTLE,
         tier1_inferencer: Optional[PatchCoreInferencer] = None,
         tier2_inferencer: Optional[ClassifierInferencer] = None,
         tier3_detector: Optional[YOLODetector] = None,
@@ -108,20 +132,22 @@ class UnifiedQualityInspector:
         device: str = "cpu"
     ) -> None:
         """
-        Initializes the unified quality inspection pipeline.
+        Initializes the unified quality inspection pipeline with domain constraints.
 
         Args:
+            domain: ProductDomain (GLASS_BOTTLE, STEEL_SHEET, GENERIC_AOI).
             tier1_inferencer: Initialized PatchCoreInferencer (or creates default).
-            tier2_inferencer: Initialized ClassifierInferencer (or creates default).
-            tier3_detector: Initialized YOLODetector (or creates mock/default).
-            tier3_segmenter: Initialized UNetSegmenter (or creates default).
-            calibrator: CameraCalibrator instance (or creates default with mm_per_pixel).
-            decision_engine: DecisionEngine rule evaluator (or creates default).
+            tier2_inferencer: Initialized ClassifierInferencer (or creates default for domain).
+            tier3_detector: Initialized YOLODetector (or None if domain does not support).
+            tier3_segmenter: Initialized UNetSegmenter (or None if domain does not support).
+            calibrator: CameraCalibrator instance.
+            decision_engine: DecisionEngine rule evaluator.
             thresholds: QualityThresholds configuration for decision rules.
             mm_per_pixel: Physical calibration scale (default 0.10 mm/pixel).
             early_exit: If True, nominal items passing Tier 1 skip downstream models for speed.
             device: Hardware device target ('cpu', 'cuda').
         """
+        self.domain = domain
         self.device = device
         self.early_exit = early_exit
 
@@ -134,7 +160,7 @@ class UnifiedQualityInspector:
         # 3. Vision Models
         self.tier1_inferencer = tier1_inferencer or PatchCoreInferencer(device=self.device)
         self.tier2_inferencer = tier2_inferencer or ClassifierInferencer(device=self.device)
-        self.tier3_detector = tier3_detector  # Can be None if YOLO weights not installed
+        self.tier3_detector = tier3_detector
         self.tier3_segmenter = tier3_segmenter or UNetSegmenter(device=self.device)
 
     def inspect(
@@ -149,7 +175,7 @@ class UnifiedQualityInspector:
         Args:
             image_input: File path, PIL Image, or NumPy array.
             render_visuals: If True, renders annotated visual overlay with HUD banner.
-            force_full_pipeline: If True, runs Tiers 2 & 3 even if Tier 1 reports nominal PASS.
+            force_full_pipeline: If True, runs full diagnostic pipeline even if Tier 1 is nominal.
 
         Returns:
             UnifiedInspectionResult: Complete inspection telemetry and verdict.
@@ -163,14 +189,17 @@ class UnifiedQualityInspector:
         # =================================================================
         # TIER 1: PatchCore Anomaly Gatekeeper
         # =================================================================
+        tau = self.decision_engine.thresholds.anomaly_threshold
+        delta = self.decision_engine.thresholds.anomaly_margin
+
         t1_response, anomaly_heatmap, _ = self.tier1_inferencer.predict(
             image_rgb,
+            threshold=tau,
+            review_margin=delta,
             mm_per_pixel=self.calibrator.mm_per_pixel
         )
 
         anomaly_score = t1_response.image_anomaly_score
-        tau = self.decision_engine.thresholds.anomaly_threshold
-        delta = self.decision_engine.thresholds.anomaly_margin
         is_clear_nominal = anomaly_score < (tau * (1.0 - delta))
 
         # Check Early-Exit Condition (Conveyor High-Throughput Optimization)
@@ -206,71 +235,139 @@ class UnifiedQualityInspector:
                 tier3_segmentation=None,
                 physical_metrics={
                     "total_defect_area_mm2": 0.0,
+                    "measurement_mode": "planar_surface" if self.domain == ProductDomain.STEEL_SHEET else "projected_sensor_plane",
                     "mm_per_pixel": self.calibrator.mm_per_pixel,
                     "num_defects": 0
                 },
                 annotated_image=annotated_img,
                 total_latency_ms=round(total_elapsed, 2),
-                early_exit_applied=True
+                early_exit_applied=True,
+                product_domain=self.domain.value
             )
 
         # =================================================================
-        # TIER 2: Defect Classification (Morphology Categorization)
+        # DOMAIN-SPECIFIC DIAGNOSTIC ESCALATION
         # =================================================================
-        t2_response = self.tier2_inferencer.predict(image_rgb)
-        defect_class = t2_response.predicted_class_name
-        class_conf = t2_response.confidence
-        class_entropy = t2_response.entropy
-
-        # =================================================================
-        # TIER 3A: Defect Localization (YOLO Bounding Boxes)
-        # =================================================================
-        t3_boxes = []
-        bbox_union_area_mm2 = 0.0
+        t2_response = None
         t3_det_response = None
+        t3_seg_response = None
+        t3_boxes: List[DetectionBox] = []
+        seg_mask: Optional[np.ndarray] = None
+        defect_class: str = "unmodeled_anomaly"
+        class_conf: float = 1.0
+        class_entropy: float = 0.0
+        pixel_defect_area_mm2: float = 0.0
+        bbox_union_area_mm2: float = 0.0
+        num_regions: int = 0
 
-        if self.tier3_detector is not None:
-            try:
-                t3_det_response = self.tier3_detector.predict(
-                    image_rgb,
-                    mm_per_pixel=self.calibrator.mm_per_pixel
+        if self.domain == ProductDomain.GLASS_BOTTLE:
+            # -------------------------------------------------------------
+            # Glassware Domain: PatchCore Heatmap Localization
+            # -------------------------------------------------------------
+            # Do not use steel-trained supervised models for glass bottles.
+            # Localize directly using PatchCore's verified pixel anomaly map (0.9848 Pixel AUROC)
+            if anomaly_heatmap is not None:
+                # Binarize anomaly map at threshold tau
+                h_resized = cv2.resize(anomaly_heatmap, (img_w, img_h), interpolation=cv2.INTER_LINEAR)
+                binary_mask = (h_resized >= tau).astype(np.uint8)
+                seg_mask = binary_mask
+
+                defect_px_count = int(np.count_nonzero(binary_mask))
+                # For curved bottles, area is estimated projected sensor-plane area
+                pixel_defect_area_mm2 = self.calibrator.estimate_projected_area_mm2(defect_px_count)
+
+                # Connected components for defect counting
+                num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary_mask)
+                num_regions = max(0, num_labels - 1)
+
+                defect_class = "glass_anomaly" if defect_px_count > 0 else "nominal"
+                class_conf = min(1.0, float(anomaly_score / (tau * 1.5))) if tau > 0 else 1.0
+
+                components_list = []
+                for label_id in range(1, num_labels):
+                    area_px = int(stats[label_id, cv2.CC_STAT_AREA])
+                    bx = int(stats[label_id, cv2.CC_STAT_LEFT])
+                    by = int(stats[label_id, cv2.CC_STAT_TOP])
+                    bw = int(stats[label_id, cv2.CC_STAT_WIDTH])
+                    bh = int(stats[label_id, cv2.CC_STAT_HEIGHT])
+                    cx, cy = float(centroids[label_id][0]), float(centroids[label_id][1])
+                    comp_area_mm2 = self.calibrator.estimate_projected_area_mm2(area_px)
+
+                    components_list.append(DefectComponent(
+                        component_id=label_id,
+                        area_pixels=area_px,
+                        area_ratio=float(area_px / (img_w * img_h)),
+                        centroid=(round(cx, 1), round(cy, 1)),
+                        bounding_box_xywh=(bx, by, bw, bh),
+                        physical_area_mm2=round(comp_area_mm2, 3)
+                    ))
+
+                t3_seg_response = SegmentationResponse(
+                    image_width=img_w,
+                    image_height=img_h,
+                    is_defective=defect_px_count > 0,
+                    total_defect_pixels=defect_px_count,
+                    defect_area_ratio=round(float(defect_px_count / (img_w * img_h)), 6),
+                    num_defect_components=num_regions,
+                    inference_time_ms=t1_response.inference_time_ms,
+                    physical_defect_area_mm2=round(pixel_defect_area_mm2, 3),
+                    components=components_list
                 )
-                t3_boxes = t3_det_response.detections
-                if t3_det_response.physical_union_area_mm2 is not None:
-                    bbox_union_area_mm2 = t3_det_response.physical_union_area_mm2
-                else:
-                    bbox_union_area_mm2 = self.calibrator.pixel_area_to_mm2(
-                        t3_det_response.total_bbox_union_area_pixels
+            else:
+                pixel_defect_area_mm2 = 0.0
+                num_regions = 0
+
+        else:
+            # -------------------------------------------------------------
+            # Steel Surface Domain (or Generic AOI):
+            # -------------------------------------------------------------
+            # Execute Tier 2 Classifier
+            t2_response = self.tier2_inferencer.predict(image_rgb)
+            defect_class = t2_response.predicted_class_name
+            class_conf = t2_response.confidence
+            class_entropy = t2_response.entropy
+
+            # Execute Tier 3A YOLO Detector
+            if self.tier3_detector is not None:
+                try:
+                    t3_det_response = self.tier3_detector.predict(
+                        image_rgb,
+                        mm_per_pixel=self.calibrator.mm_per_pixel
                     )
-            except Exception as e:
-                logger.warning(f"Tier 3 YOLO detection encountered exception: {e}")
+                    t3_boxes = t3_det_response.detections
+                    if t3_det_response.physical_union_area_mm2 is not None:
+                        bbox_union_area_mm2 = t3_det_response.physical_union_area_mm2
+                    else:
+                        bbox_union_area_mm2 = self.calibrator.pixel_area_to_mm2(
+                            t3_det_response.total_bbox_union_area_pixels,
+                            is_planar_surface=True
+                        )
+                except Exception as e:
+                    logger.warning(f"Tier 3 YOLO detection encountered exception: {e}")
 
-        # =================================================================
-        # TIER 3B: Defect Segmentation (PyTorch U-Net Pixel Masks)
-        # =================================================================
-        t3_seg_response, seg_mask, _ = self.tier3_segmenter.predict(
-            image_rgb,
-            mm_per_pixel=self.calibrator.mm_per_pixel
-        )
+            # Execute Tier 3B U-Net Segmenter
+            t3_seg_response, seg_mask, _ = self.tier3_segmenter.predict(
+                image_rgb,
+                mm_per_pixel=self.calibrator.mm_per_pixel
+            )
+            pixel_defect_area_mm2 = (
+                t3_seg_response.physical_defect_area_mm2
+                if t3_seg_response.physical_defect_area_mm2 is not None
+                else self.calibrator.pixel_area_to_mm2(t3_seg_response.total_defect_pixels, is_planar_surface=True)
+            )
 
-        pixel_defect_area_mm2 = (
-            t3_seg_response.physical_defect_area_mm2
-            if t3_seg_response.physical_defect_area_mm2 is not None
-            else self.calibrator.pixel_area_to_mm2(t3_seg_response.total_defect_pixels)
-        )
-
-        num_regions = max(
-            t3_seg_response.num_defect_components,
-            len(t3_boxes),
-            t1_response.num_anomaly_regions
-        )
+            num_regions = max(
+                t3_seg_response.num_defect_components,
+                len(t3_boxes),
+                t1_response.num_anomaly_regions
+            )
 
         # =================================================================
         # DECISION ENGINE: Multi-Tier Synthesis & Diverter Routing
         # =================================================================
         verdict = self.decision_engine.evaluate(
             anomaly_score=anomaly_score,
-            is_anomalous=t1_response.is_anomalous,
+            is_anomalous=t1_response.is_anomalous or (anomaly_score >= tau),
             defect_class=defect_class,
             class_confidence=class_conf,
             class_entropy=class_entropy,
@@ -282,10 +379,15 @@ class UnifiedQualityInspector:
         total_elapsed = (time.perf_counter() - t_start) * 1000.0
 
         # Physical Metrics Payload
+        measurement_mode = (
+            "planar_surface" if self.domain == ProductDomain.STEEL_SHEET else "projected_sensor_plane"
+        )
         physical_metrics = {
             "total_defect_area_mm2": round(verdict.physical_defect_area_mm2, 3),
             "pixel_defect_area_mm2": round(pixel_defect_area_mm2, 3),
             "bbox_union_area_mm2": round(bbox_union_area_mm2, 3),
+            "measurement_mode": measurement_mode,
+            "is_planar_surface": self.domain == ProductDomain.STEEL_SHEET,
             "num_defect_regions": num_regions,
             "mm_per_pixel": round(self.calibrator.mm_per_pixel, 5),
             "image_width_px": img_w,
@@ -313,7 +415,8 @@ class UnifiedQualityInspector:
             physical_metrics=physical_metrics,
             annotated_image=annotated_img,
             total_latency_ms=round(total_elapsed, 2),
-            early_exit_applied=False
+            early_exit_applied=False,
+            product_domain=self.domain.value
         )
 
     def _load_image_rgb(self, image_input: Union[np.ndarray, Image.Image, str, Path]) -> np.ndarray:

@@ -21,7 +21,11 @@ from src.inspection.decision_engine import (
     RoutingAction,
     SeverityLevel,
 )
-from src.inspection.unified_pipeline import UnifiedInspectionResult, UnifiedQualityInspector
+from src.inspection.unified_pipeline import (
+    ProductDomain,
+    UnifiedInspectionResult,
+    UnifiedQualityInspector,
+)
 from src.inspection.visualizer import InspectionVisualizer
 
 
@@ -273,18 +277,19 @@ class MockPatchCoreInferencer:
     def __init__(self, score: float = 6.0):
         self.score = score
 
-    def predict(self, img, mm_per_pixel=0.10):
+    def predict(self, img, threshold=15.0, review_margin=0.15, mm_per_pixel=0.10, **kwargs):
         from src.inference.anomaly_inference import AnomalyInspectionResponse
+        th = threshold if threshold is not None else 15.0
         resp = AnomalyInspectionResponse(
-            decision="PASS" if self.score < 15.0 else "FAIL",
+            decision="PASS" if self.score < th else "FAIL",
             image_anomaly_score=self.score,
-            threshold=15.0,
-            is_anomalous=self.score >= 15.0,
-            defect_pixel_count=0 if self.score < 15.0 else 50,
-            defect_area_ratio=0.0 if self.score < 15.0 else 0.05,
-            physical_defect_area_mm2=0.0 if self.score < 15.0 else 0.5,
+            threshold=th,
+            is_anomalous=self.score >= th,
+            defect_pixel_count=0 if self.score < th else 50,
+            defect_area_ratio=0.0 if self.score < th else 0.05,
+            physical_defect_area_mm2=0.0 if self.score < th else 0.5,
             inference_time_ms=10.0,
-            num_anomaly_regions=0 if self.score < 15.0 else 1,
+            num_anomaly_regions=0 if self.score < th else 1,
             regions=[]
         )
         return resp, np.zeros((64, 64), dtype=np.float32), np.zeros((64, 64, 3), dtype=np.uint8)
@@ -315,6 +320,7 @@ def test_unified_quality_inspector_early_exit():
 def test_unified_quality_inspector_full_pipeline_on_anomaly():
     """Confirms that anomalous items trigger full execution across all three tiers."""
     inspector = UnifiedQualityInspector(
+        domain=ProductDomain.STEEL_SHEET,
         tier1_inferencer=MockPatchCoreInferencer(score=22.5),  # High anomaly score
         early_exit=True,
         thresholds=QualityThresholds(anomaly_threshold=15.0, anomaly_margin=0.15),
@@ -329,5 +335,95 @@ def test_unified_quality_inspector_full_pipeline_on_anomaly():
     assert result.tier2_classification is not None
     assert result.tier3_segmentation is not None
     assert "total_defect_area_mm2" in result.physical_metrics
+    assert result.physical_metrics["measurement_mode"] == "planar_surface"
     assert result.annotated_image is not None
     assert result.total_latency_ms > 0.0
+
+
+def test_decision_engine_unknown_defect_precedence():
+    """Confirms that unmodeled anomalies flagged by Tier 1 never silently pass."""
+    engine = DecisionEngine(QualityThresholds(anomaly_threshold=10.22, anomaly_margin=0.15))
+
+    # Case A: Anomaly score in borderline band (tau=10.22, band=[8.69, 11.75])
+    # Tier 1 flags anomaly (score 11.0 > 10.22), but supervised heads report nominal
+    verdict_review = engine.evaluate(
+        anomaly_score=11.0,
+        is_anomalous=True,
+        defect_class="nominal",
+        class_confidence=0.99,
+        pixel_defect_area_mm2=0.0,
+        num_defect_regions=0
+    )
+    # Must be intercepted for operator review, never PASS
+    assert verdict_review.decision == InspectionDecision.REVIEW
+    assert verdict_review.routing == RoutingAction.MANUAL_INSPECTION_BAY
+    assert "unmodeled_anomaly" in verdict_review.primary_defect_type.lower() or "open-set" in verdict_review.engineering_rationale.lower()
+
+    # Case B: Severe anomaly score exceeding upper margin (13.0 >= 11.75)
+    # Even if supervised heads find nothing, severe anomaly forces FAIL
+    verdict_fail = engine.evaluate(
+        anomaly_score=13.0,
+        is_anomalous=True,
+        defect_class="nominal",
+        class_confidence=0.99,
+        pixel_defect_area_mm2=0.0,
+        num_defect_regions=0
+    )
+    assert verdict_fail.decision == InspectionDecision.FAIL
+    assert verdict_fail.routing == RoutingAction.AUTOMATIC_REJECT_BIN
+
+
+def test_decision_engine_anomaly_overrides_subthreshold_area():
+    """Confirms that sub-threshold physical damage area cannot override an anomaly FAIL."""
+    engine = DecisionEngine(QualityThresholds(
+        anomaly_threshold=10.22,
+        anomaly_margin=0.15,
+        max_acceptable_area_mm2=0.50
+    ))
+
+    # Anomaly score exceeds upper margin (10.22 * 1.15 = 11.75), but area is tiny (0.1 mm^2)
+    verdict = engine.evaluate(
+        anomaly_score=14.5,
+        is_anomalous=True,
+        defect_class="micro_scratch",
+        class_confidence=0.85,
+        pixel_defect_area_mm2=0.10,  # Below 0.50 mm^2 tolerance
+        num_defect_regions=1
+    )
+
+    # Upper anomaly margin breach forces FAIL regardless of tiny area
+    assert verdict.decision == InspectionDecision.FAIL
+    assert verdict.severity == SeverityLevel.CRITICAL
+    assert verdict.routing == RoutingAction.AUTOMATIC_REJECT_BIN
+
+
+def test_unified_quality_inspector_domain_separation():
+    """Validates domain-specific geometric qualifications and localization engines."""
+    inspector_bottle = UnifiedQualityInspector(
+        domain=ProductDomain.GLASS_BOTTLE,
+        tier1_inferencer=MockPatchCoreInferencer(score=20.0),
+        early_exit=False,
+        thresholds=QualityThresholds(anomaly_threshold=10.22),
+        device="cpu"
+    )
+    res_b = inspector_bottle.inspect(np.zeros((64, 64, 3), dtype=np.uint8))
+    assert res_b.product_domain == "GLASS_BOTTLE"
+    assert res_b.physical_metrics["measurement_mode"] == "projected_sensor_plane"
+    assert res_b.physical_metrics["is_planar_surface"] is False
+    # Bottle domain does not run steel classifier
+    assert res_b.tier2_classification is None
+
+    inspector_steel = UnifiedQualityInspector(
+        domain=ProductDomain.STEEL_SHEET,
+        tier1_inferencer=MockPatchCoreInferencer(score=20.0),
+        early_exit=False,
+        thresholds=QualityThresholds(anomaly_threshold=10.22),
+        device="cpu"
+    )
+    res_s = inspector_steel.inspect(np.zeros((64, 64, 3), dtype=np.uint8))
+    assert res_s.product_domain == "STEEL_SHEET"
+    assert res_s.physical_metrics["measurement_mode"] == "planar_surface"
+    assert res_s.physical_metrics["is_planar_surface"] is True
+    # Steel domain runs classifier
+    assert res_s.tier2_classification is not None
+

@@ -11,16 +11,14 @@ from huggingface_hub import hf_hub_download
 
 from src.models.anomaly_detection.patchcore import PatchCore
 from src.inference.anomaly_inference import PatchCoreInferencer
-from src.inference.classifier_inference import ClassifierInferencer, MVTEC_BOTTLE_CLASSES
-from src.inference.segmenter_inference import UNetSegmenter
 from src.inspection.camera_calibration import CameraCalibrator
 from src.inspection.decision_engine import DecisionEngine, QualityThresholds
-from src.inspection.unified_pipeline import UnifiedQualityInspector
+from src.inspection.unified_pipeline import ProductDomain, UnifiedQualityInspector
 from src.inspection.visualizer import InspectionVisualizer
 
 def run_demo():
     print("=" * 70)
-    print("UNIFIED MULTI-TIER INSPECTION PIPELINE DEMO")
+    print("UNIFIED MULTI-TIER INSPECTION PIPELINE DEMO (GLASS_BOTTLE DOMAIN)")
     print("=" * 70)
 
     device = "cpu"
@@ -28,7 +26,7 @@ def run_demo():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Load Tier 1 PatchCore from cached checkpoint
-    print("[1] Initializing Tier 1 PatchCore Anomaly Gatekeeper...")
+    print("[1] Initializing Tier 1 PatchCore Anomaly Gatekeeper & Localization...")
     ckpt_path = hf_hub_download(
         repo_id="TAC13/industrial-damage-patchcore-bottle",
         filename="checkpoints/patchcore_bottle_wide_resnet50_2.pt"
@@ -39,36 +37,24 @@ def run_demo():
     patchcore_model.backbone.eval()
     t1_inferencer = PatchCoreInferencer(patchcore_instance=patchcore_model, device=device)
 
-    # 2. Initialize Tier 2 Classifier
-    print("[2] Initializing Tier 2 Multi-Class Classifier...")
-    t2_inferencer = ClassifierInferencer(
-        class_names=MVTEC_BOTTLE_CLASSES,
-        device=device,
-        nominal_class_name="good"
-    )
-
-    # 3. Initialize Tier 3 Segmenter
-    print("[3] Initializing Tier 3 Semantic Segmenter...")
-    t3_segmenter = UNetSegmenter(device=device)
-
-    # 4. Camera Calibrator (0.15 mm per pixel: e.g. 224 px = 33.6 mm field of view)
+    # 2. Camera Calibrator (0.15 mm per pixel: e.g. 224 px = 33.6 mm field of view)
     calibrator = CameraCalibrator(mm_per_pixel=0.15)
 
-    # 5. Decision Engine
+    # 3. Decision Engine
+    # Using the operational separation threshold: tau = 15.50 (safety band: [13.95, 17.05])
+    # Distinguishes nominal test samples (scores <= 15.37) from defective samples (scores >= 18.10)
     thresholds = QualityThresholds(
-        anomaly_threshold=15.5,
-        anomaly_margin=0.15,
-        critical_area_mm2=3.0,
+        anomaly_threshold=15.50,
+        anomaly_margin=0.10,
+        critical_area_mm2=25.0,  # Demonstration threshold for reject
         critical_classes=["broken_large", "crazing"]
     )
     decision_engine = DecisionEngine(thresholds=thresholds)
 
-    # 6. Unified Inspector
+    # 4. Unified Inspector configured for GLASS_BOTTLE domain
     inspector = UnifiedQualityInspector(
+        domain=ProductDomain.GLASS_BOTTLE,
         tier1_inferencer=t1_inferencer,
-        tier2_inferencer=t2_inferencer,
-        tier3_detector=None,  # Fallback to U-Net segmentation
-        tier3_segmenter=t3_segmenter,
         calibrator=calibrator,
         decision_engine=decision_engine,
         early_exit=True,
@@ -78,6 +64,7 @@ def run_demo():
     # Test Samples
     samples = [
         ("nominal_part", Path("datasets/raw/mvtec_ad/bottle/test/good/000.png")),
+        ("broken_small_part", Path("datasets/raw/mvtec_ad/bottle/test/broken_small/000.png")),
         ("broken_large_part", Path("datasets/raw/mvtec_ad/bottle/test/broken_large/000.png")),
         ("contamination_part", Path("datasets/raw/mvtec_ad/bottle/test/contamination/000.png"))
     ]
@@ -90,20 +77,20 @@ def run_demo():
         print(f"\n---> Inspecting: {name} ({img_path.name})")
         result = inspector.inspect(img_path, render_visuals=True, force_full_pipeline=(name != "nominal_part"))
 
-        print(f"     Verdict          : {result.verdict.decision.value} [{result.verdict.routing.value}]")
-        print(f"     Severity         : {result.verdict.severity.value}")
-        print(f"     Anomaly Score    : {result.verdict.anomaly_score:.2f}")
-        print(f"     Defect Class     : {result.verdict.primary_defect_type}")
-        print(f"     Physical Area    : {result.verdict.physical_defect_area_mm2:.2f} mm²")
-        print(f"     Early Exit?      : {result.early_exit_applied}")
-        print(f"     Total Latency    : {result.total_latency_ms:.1f} ms")
-        print(f"     Rationale        : {result.verdict.engineering_rationale}")
+        print(f"     Verdict               : {result.verdict.decision.value} [{result.verdict.routing.value}]")
+        print(f"     Severity              : {result.verdict.severity.value}")
+        print(f"     Anomaly Score         : {result.verdict.anomaly_score:.2f}")
+        print(f"     Defect Class          : {result.verdict.primary_defect_type}")
+        print(f"     Projected Damage Area : {result.verdict.physical_defect_area_mm2:.2f} mm² ({result.physical_metrics['measurement_mode']})")
+        print(f"     Early Exit Applied?   : {result.early_exit_applied}")
+        print(f"     Total Latency         : {result.total_latency_ms:.1f} ms")
+        print(f"     Rationale             : {result.verdict.engineering_rationale}")
 
         # Save annotated HUD image
         if result.annotated_image is not None:
             hud_path = output_dir / f"hud_{name}.png"
             cv2.imwrite(str(hud_path), cv2.cvtColor(result.annotated_image, cv2.COLOR_RGB2BGR))
-            print(f"     Saved HUD visual : {hud_path}")
+            print(f"     Saved HUD visual      : {hud_path}")
 
         # Generate and save Quad-Panel Dashboard
         img_rgb = inspector._load_image_rgb(img_path)
@@ -117,7 +104,7 @@ def run_demo():
         )
         quad_path = output_dir / f"quad_{name}.png"
         cv2.imwrite(str(quad_path), cv2.cvtColor(quad, cv2.COLOR_RGB2BGR))
-        print(f"     Saved Quad Panel : {quad_path}")
+        print(f"     Saved Quad Panel      : {quad_path}")
 
     print("\n" + "=" * 70)
     print(f"DEMO COMPLETE: All visual inspection reports saved to: {output_dir}")

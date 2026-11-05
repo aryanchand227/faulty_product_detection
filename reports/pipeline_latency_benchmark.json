@@ -1,0 +1,46 @@
+{
+  "hardware": {
+    "device": "cpu",
+    "torch_version": "2.15.0+cpu",
+    "input_resolution": "224x224 (normalized) / 900x900 (native)",
+    "batch_size": 1,
+    "warmup_iterations": 3,
+    "timed_iterations": 15
+  },
+  "scenario_1_nominal_early_exit": {
+    "description": "Tier 1 PatchCore Gatekeeper only (no downstream heads or visuals)",
+    "mean_ms": 751.15,
+    "median_ms": 736.55,
+    "p95_ms": 821.9,
+    "p99_ms": 845.2,
+    "throughput_fps": 1.36,
+    "parts_per_minute": 81.5
+  },
+  "scenario_2_defective_full_diagnostic": {
+    "description": "Tier 1 Anomaly + Localization Heatmap + Decision Engine + Visual HUD Overlay",
+    "mean_ms": 804.91,
+    "median_ms": 799.75,
+    "p95_ms": 848.17,
+    "p99_ms": 885.74,
+    "throughput_fps": 1.25,
+    "parts_per_minute": 75.0
+  },
+  "scenario_3_mixed_production_1pct_defects": {
+    "defect_rate_percent": 1.0,
+    "mean_ms": 752.54,
+    "median_ms": 736.55,
+    "p95_ms": 851.02,
+    "p99_ms": 851.02,
+    "effective_fps": 1.33,
+    "parts_per_minute": 79.7
+  },
+  "scenario_3_mixed_production_5pct_defects": {
+    "defect_rate_percent": 5.0,
+    "mean_ms": 754.36,
+    "median_ms": 748.72,
+    "p95_ms": 851.02,
+    "p99_ms": 851.02,
+    "effective_fps": 1.33,
+    "parts_per_minute": 79.5
+  }
+}

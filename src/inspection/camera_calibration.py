@@ -116,17 +116,38 @@ class CameraCalibrator:
         """
         return float(mm) / self.mm_per_pixel
 
-    def pixel_area_to_mm2(self, pixel_area: float) -> float:
+    def pixel_area_to_mm2(self, pixel_area: float, is_planar_surface: bool = True) -> float:
         """
-        Converts discrete pixel area to physical surface area in square millimeters (mm^2).
+        Converts discrete pixel area to physical area in square millimeters (mm^2).
+
+        Geometric Validity & Optical Constraints:
+        -----------------------------------------
+        1. Flat Planar Surfaces (is_planar_surface=True, e.g. NEU-DET rolled steel strips):
+           The single-scalar relationship Area_mm2 = Area_px * (mm_per_pixel)^2 is physically
+           rigorous, assuming the surface is perpendicular to the optical axis and lens
+           distortion is corrected.
+        2. 3D Curved Surfaces (is_planar_surface=False, e.g. MVTec AD glass bottles):
+           A single planar scalar represents an ESTIMATED 2D PROJECTED DEFECT AREA on the camera
+           sensor plane, NOT the true 3D surface area. Due to cylindrical foreshortening
+           (dA_proj = cos(theta) * dA_true), apparent area shrinks toward the bottle silhouette.
+           Accurate 3D surface measurement requires cylindrical unrolling, multi-camera views,
+           or optical laser triangulation.
 
         Args:
             pixel_area: Area in pixels^2 (e.g. from mask or bbox).
+            is_planar_surface: Flag indicating whether inspected surface is flat.
 
         Returns:
-            float: Surface area in mm^2.
+            float: Area in square millimeters (mm^2).
         """
         return float(pixel_area) * self.mm2_per_pixel2
+
+    def estimate_projected_area_mm2(self, pixel_area: float) -> float:
+        """
+        Calculates estimated 2D projected defect area on the sensor plane (mm^2).
+        Explicitly designated for 3D curved objects where true surface area is unrolled.
+        """
+        return self.pixel_area_to_mm2(pixel_area, is_planar_surface=False)
 
     def mm2_to_pixel_area(self, area_mm2: float) -> float:
         """
