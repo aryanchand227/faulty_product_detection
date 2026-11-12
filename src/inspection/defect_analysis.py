@@ -175,6 +175,11 @@ class InspectionCertificate:
     calibration_scale_mm_per_pixel: float
     sha256_integrity_hash: str          # Content digest of canonical fields
     hmac_sha256_signature: str          # Authenticated signature generated with secret key
+    key_id: str = "KEY-2026-V1"
+    model_artifact_id: str = "TAC13/industrial-damage-patchcore-bottle@main"
+    software_version: str = "1.0.0"
+    calibration_profile_id: str = "CALIB-BOTTLE-0.15MM-V1"
+    decision_policy_version: str = "POL-v1.0.0"
 
     # Backward compatibility property
     @property
@@ -198,6 +203,9 @@ class InspectionCertificate:
         md.append(f"**Configuration Version:** `{self.config_version}`  ")
         md.append(f"**Product Domain:** `{self.product_domain}`  ")
         md.append(f"**Image SHA-256:** `{self.source_image_hash[:16]}...`  ")
+        md.append(f"**HMAC Key Identifier:** `{self.key_id}`  ")
+        md.append(f"**Model Artifact ID:** `{self.model_artifact_id}`  ")
+        md.append(f"**Software / Policy Version:** `{self.software_version}` / `{self.decision_policy_version}`  ")
         md.append(f"**HMAC-SHA256 Auth Signature:** `{self.hmac_sha256_signature[:24]}...`  \n")
         md.append("---")
         md.append(f"## 1. Quality Triage Verdict")
@@ -506,7 +514,12 @@ class InspectionReportGenerator:
         source_image_bytes: Optional[bytes] = None,
         config_version: str = "CFG-v1.0.0",
         certificate_prefix: str = "CERT",
-        hmac_secret: bytes = DEFAULT_HMAC_SECRET
+        hmac_secret: bytes = DEFAULT_HMAC_SECRET,
+        key_id: str = "KEY-2026-V1",
+        model_artifact_id: str = "TAC13/industrial-damage-patchcore-bottle@main",
+        software_version: str = "1.0.0",
+        calibration_profile_id: str = "CALIB-BOTTLE-0.15MM-V1",
+        decision_policy_version: str = "POL-v1.0.0",
     ) -> InspectionCertificate:
         """
         Synthesizes an end-to-end inspection certificate with HMAC-SHA256 authentication
@@ -588,6 +601,11 @@ class InspectionReportGenerator:
             "defect_components": components_dict,
             "engineering_rationale": inspection_result.verdict.engineering_rationale,
             "calibration_scale_mm_per_pixel": round(float(inspection_result.physical_metrics.get("scale_mm_per_pixel", 0.15)), 5),
+            "key_id": key_id,
+            "model_artifact_id": model_artifact_id,
+            "software_version": software_version,
+            "calibration_profile_id": calibration_profile_id,
+            "decision_policy_version": decision_policy_version,
         }
 
         # 1. SHA-256 Content Integrity Hash
@@ -605,10 +623,12 @@ class InspectionReportGenerator:
     @staticmethod
     def verify_certificate(
         certificate_data: Dict[str, Any],
-        hmac_secret: bytes = DEFAULT_HMAC_SECRET
+        hmac_secret: Optional[bytes] = None,
+        key_registry: Optional[Dict[str, bytes]] = None,
     ) -> bool:
         """
         Verifies the cryptographic HMAC authenticity and SHA-256 integrity of an inspection certificate.
+        Supports key rotation via key_registry lookup based on certificate key_id.
         Returns True if the certificate is authentic and untampered.
         """
         cert_copy = dict(certificate_data)
@@ -619,9 +639,18 @@ class InspectionReportGenerator:
         if not reported_sig or not reported_hash:
             return False
 
+        # Resolve secret key
+        resolved_key = hmac_secret
+        if resolved_key is None:
+            key_id = cert_copy.get("key_id", "KEY-2026-V1")
+            if key_registry and key_id in key_registry:
+                resolved_key = key_registry[key_id]
+            else:
+                resolved_key = DEFAULT_HMAC_SECRET
+
         canonical_bytes = json.dumps(cert_copy, sort_keys=True).encode("utf-8")
         computed_hash = hashlib.sha256(canonical_bytes).hexdigest()
-        computed_sig = hmac.new(hmac_secret, canonical_bytes, hashlib.sha256).hexdigest()
+        computed_sig = hmac.new(resolved_key, canonical_bytes, hashlib.sha256).hexdigest()
 
         is_hash_valid = hmac.compare_digest(reported_hash, computed_hash)
         is_sig_valid = hmac.compare_digest(reported_sig, computed_sig)

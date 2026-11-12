@@ -1,5 +1,6 @@
 """
 Quality Analytics and Operational Factory KPI Endpoints.
+Computes statistical yield, latency percentiles, and zone spatial vulnerabilities.
 """
 
 from datetime import datetime, timezone, timedelta
@@ -7,6 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from backend.app.core.security import Role, require_auditor
 from backend.app.database.connection import get_db
 from backend.app.database import crud
 from backend.app.schemas.history import AnalyticsSummaryResponse
@@ -22,15 +24,22 @@ router = APIRouter()
 def get_production_analytics(
     domain: Optional[str] = Query(None, description="Filter by product domain: GLASS_BOTTLE or STEEL_SHEET"),
     days: int = Query(7, ge=1, le=365, description="Lookback window in days"),
+    include_archived: bool = Query(False, description="Include archived records"),
+    client_role: Role = Depends(require_auditor),
     db: Session = Depends(get_db),
 ):
     """
     Computes factory quality statistics over the requested time window:
-    pass/review/fail rates, early-exit rate, anomaly score distribution,
+    formal pass/review/fail rates, early-exit rate, latency percentiles (p50, p95, p99),
     defect category breakdown, and spatial zone vulnerabilities.
     """
     start_time = datetime.now(timezone.utc) - timedelta(days=days)
-    summary_data = crud.get_analytics_summary(db, domain=domain, start_time=start_time)
+    summary_data = crud.get_analytics_summary(
+        db,
+        domain=domain,
+        start_time=start_time,
+        include_archived=include_archived,
+    )
     return AnalyticsSummaryResponse(**summary_data)
 
 
@@ -40,6 +49,8 @@ def get_production_analytics(
 )
 def get_zone_vulnerability_heatmap(
     domain: Optional[str] = Query(None, description="Product domain"),
+    include_archived: bool = Query(False, description="Include archived records"),
+    client_role: Role = Depends(require_auditor),
     db: Session = Depends(get_db),
 ):
     """
@@ -57,20 +68,25 @@ def get_zone_vulnerability_heatmap(
         func.max(DefectComponentRecord.zone_risk_weight).label("risk_multiplier")
     ).join(InspectionRecord, DefectComponentRecord.inspection_id == InspectionRecord.id)
 
+    if not include_archived:
+        q = q.filter(InspectionRecord.record_status == "ACTIVE")
     if domain:
         q = q.filter(InspectionRecord.product_domain == domain)
 
-    results = q.group_by(DefectComponentRecord.spatial_zone).all()
+    rows = q.group_by(DefectComponentRecord.spatial_zone).all()
 
-    items = []
-    for row in results:
-        items.append({
-            "zone": row.spatial_zone,
-            "defect_count": row.defect_count,
-            "total_area_mm2": round(float(row.total_area_mm2 or 0.0), 3),
-            "mean_severity_score": round(float(row.mean_severity or 0.0), 2),
-            "risk_multiplier": float(row.risk_multiplier or 1.0)
-        })
+    heatmap = {}
+    for r in rows:
+        heatmap[r[0]] = {
+            "defect_count": r[1],
+            "total_area_mm2": round(float(r[2] or 0.0), 3),
+            "mean_severity": round(float(r[3] or 0.0), 2),
+            "risk_multiplier": round(float(r[4] or 1.0), 2),
+        }
 
-    return {"zones": items, "count": len(items)}
-
+    return {
+        "product_domain": domain or "ALL",
+        "zones_analyzed": len(heatmap),
+        "zones": [{"zone": k, **v} for k, v in heatmap.items()],
+        "spatial_vulnerabilities": heatmap
+    }

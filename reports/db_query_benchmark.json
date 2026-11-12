@@ -1,0 +1,47 @@
+{
+  "single_lookup_primary_key": {
+    "mean_ms": 1.811,
+    "median_p50_ms": 1.594,
+    "p95_ms": 2.71,
+    "p99_ms": 3.654,
+    "min_ms": 1.158,
+    "max_ms": 10.044,
+    "throughput_qps": 552.1
+  },
+  "single_lookup_certificate_id": {
+    "mean_ms": 1.569,
+    "median_p50_ms": 1.35,
+    "p95_ms": 2.338,
+    "p99_ms": 2.7,
+    "min_ms": 1.13,
+    "max_ms": 5.803,
+    "throughput_qps": 637.3
+  },
+  "multi_filter_paginated_query": {
+    "mean_ms": 5.418,
+    "median_p50_ms": 4.545,
+    "p95_ms": 7.129,
+    "p99_ms": 9.325,
+    "min_ms": 3.777,
+    "max_ms": 57.867,
+    "throughput_qps": 184.6
+  },
+  "analytics_kpi_aggregation": {
+    "mean_ms": 12.973,
+    "median_p50_ms": 12.542,
+    "p95_ms": 15.214,
+    "p99_ms": 19.163,
+    "min_ms": 10.124,
+    "max_ms": 31.772,
+    "throughput_qps": 77.1
+  },
+  "cryptographic_hmac_verification": {
+    "mean_ms": 2.067,
+    "median_p50_ms": 1.928,
+    "p95_ms": 3.122,
+    "p99_ms": 3.503,
+    "min_ms": 1.338,
+    "max_ms": 3.894,
+    "throughput_qps": 483.7
+  }
+}

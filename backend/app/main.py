@@ -1,15 +1,18 @@
 """
 FastAPI Application Entry Point.
-Configures middleware, routes, lifespan database initialization, and system health checks.
+Configures middleware, routes, lifespan database initialization, system health checks,
+and serves the industrial inspection frontend dashboard.
 """
 
 from contextlib import asynccontextmanager
 import sys
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from backend.app.core.config import settings
+from backend.app.core.config import settings, PROJECT_ROOT
 from backend.app.database.connection import init_db, check_db_health
 from backend.app.api.routes import inspection, history, analytics, models
 
@@ -67,6 +70,11 @@ def health_check():
     )
 
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("backend.app.main:app", host="127.0.0.1", port=8000, reload=True)
+# Serve Frontend Web Dashboard
+frontend_path = PROJECT_ROOT / "frontend"
+if frontend_path.exists() and (frontend_path / "index.html").exists():
+    app.mount("/dashboard", StaticFiles(directory=str(frontend_path), html=True), name="dashboard")
+
+    @app.get("/", include_in_schema=False)
+    def root():
+        return RedirectResponse(url="/dashboard/")

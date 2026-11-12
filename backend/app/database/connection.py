@@ -1,11 +1,13 @@
 """
 Database Connection and Session Management for Industrial AOI Service.
 Supports SQLite (local development and tests) and PostgreSQL (production).
+Enforces relational integrity, foreign key cascades, and connection pooling.
 """
 
 import logging
 from typing import Generator
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 from backend.app.core.config import settings
@@ -29,6 +31,20 @@ engine = create_engine(
     connect_args=connect_args,
     **engine_kwargs
 )
+
+
+# Enforce SQLite foreign key cascades on every connection
+@event.listens_for(Engine, "connect")
+def set_sqlite_pragma(dbapi_connection, connection_record):
+    """Ensures SQLite enforces foreign key constraints and cascade actions."""
+    try:
+        # Check if driver has cursor method (standard DBAPI)
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+    except Exception:
+        pass
+
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -63,4 +79,3 @@ def check_db_health() -> bool:
     except Exception as e:
         logger.warning(f"Database health check failed: {e}")
         return False
-

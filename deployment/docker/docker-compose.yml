@@ -1,0 +1,66 @@
+version: "3.8"
+
+services:
+  # ============================================================================
+  # Industrial AOI Inspection Backend Service
+  # ============================================================================
+  aoi-backend:
+    build:
+      context: ../..
+      dockerfile: deployment/docker/Dockerfile
+    container_name: aoi-microservice
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PROJECT_NAME=Industrial Optical Inspection Microservice
+      - DATABASE_URL=postgresql://aoi_user:aoi_secure_pass_2026@postgres-db:5432/inspection_db
+      - AOI_ADMIN_API_KEY=aoi-admin-secret-key-2026
+      - AOI_AUDITOR_API_KEY=aoi-auditor-secret-key-2026
+      - AOI_OPERATOR_API_KEY=aoi-operator-secret-key-2026
+      - AOI_HMAC_SECRET_KEY=aoi-production-secret-key-2026-compliance
+      - AOI_ACTIVE_KEY_ID=KEY-2026-V1
+      - AOI_ALLOW_HARD_DELETE=false
+      - AOI_BATCH_CONCURRENCY_LIMIT=4
+      - INFERENCE_DEVICE=cpu
+    volumes:
+      - inspection_media_data:/app/data/inspection_media
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+    networks:
+      - aoi-network
+
+  # ============================================================================
+  # Relational PostgreSQL 16 Storage Database
+  # ============================================================================
+  postgres-db:
+    image: postgres:16-alpine
+    container_name: aoi-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=inspection_db
+      - POSTGRES_USER=aoi_user
+      - POSTGRES_PASSWORD=aoi_secure_pass_2026
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aoi_user -d inspection_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - aoi-network
+
+volumes:
+  inspection_media_data:
+    driver: local
+  postgres_data:
+    driver: local
+
+networks:
+  aoi-network:
+    driver: bridge
+

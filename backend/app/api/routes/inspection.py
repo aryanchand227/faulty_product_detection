@@ -1,18 +1,24 @@
 """
 FastAPI Routes for Industrial Optical Inspection & Defect Analysis.
-Features threadpool offloading, authorization guards, and configuration audit trails.
+Features threadpool offloading, RBAC authorization guards, bounded batch concurrency,
+resource limits, and configuration audit trails.
 """
 
 import base64
 import logging
-import os
 import uuid
 from typing import List, Optional
 import anyio
-from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy.orm import Session
 
 from backend.app.core.config import settings
+from backend.app.core.security import (
+    Role,
+    require_admin,
+    require_auditor,
+    require_operator,
+)
 from backend.app.database.connection import get_db
 from backend.app.database import crud
 from backend.app.schemas.history import BatchInspectionItem, BatchInspectionResponse
@@ -32,30 +38,16 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Max allowable file upload size (15 MB)
-MAX_UPLOAD_SIZE_BYTES = 15 * 1024 * 1024
+# Global capacity limiter to bound simultaneous inference operations and prevent GPU/CPU memory exhaustion
+_BATCH_CAPACITY_LIMITER = anyio.CapacityLimiter(settings.BATCH_CONCURRENCY_LIMIT)
 
-# Admin API Key for mutating operational parameters
-EXPECTED_ADMIN_KEY = os.getenv("AOI_ADMIN_API_KEY", "aoi-admin-secret-key-2026")
+# Backward-compatibility alias
+verify_admin_authorization = require_admin
 
 
 def get_inspection_service() -> InspectionService:
     """Dependency provider returning singleton inspection service."""
     return InspectionService.get_instance()
-
-
-def verify_admin_authorization(
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key")
-) -> str:
-    """
-    Security gatekeeper: validates admin authorization key for configuration mutation.
-    """
-    if x_api_key is not None and x_api_key != EXPECTED_ADMIN_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or unauthorized X-API-Key header for configuration mutation."
-        )
-    return x_api_key or "default_operator"
 
 
 @router.post(
@@ -72,6 +64,7 @@ async def inspect_product_image(
     extract_morphology: bool = Query(True, description="Extract granular contour shape metrics"),
     generate_certificate: bool = Query(True, description="Generate cryptographically signed compliance certificate"),
     persist_to_db: bool = Query(True, description="Persist inspection run and defect components to relational database"),
+    client_role: Role = Depends(require_operator),
     service: InspectionService = Depends(get_inspection_service),
     db: Session = Depends(get_db)
 ):
@@ -79,17 +72,17 @@ async def inspect_product_image(
     if file.content_type not in ["image/jpeg", "image/png", "image/bmp", "image/webp", "application/octet-stream"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported image media type: {file.content_type}. Please upload JPEG or PNG."
+            detail=f"Unsupported image media type: {file.content_type}. Please upload JPEG, PNG, or BMP."
         )
 
     try:
         image_bytes = await file.read()
         if len(image_bytes) == 0:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty.")
-        if len(image_bytes) > MAX_UPLOAD_SIZE_BYTES:
+        if len(image_bytes) > settings.MAX_UPLOAD_SIZE_BYTES:
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=f"Uploaded image size ({len(image_bytes)} bytes) exceeds maximum limit ({MAX_UPLOAD_SIZE_BYTES} bytes)."
+                detail=f"Uploaded image size ({len(image_bytes)} bytes) exceeds maximum allowable limit ({settings.MAX_UPLOAD_SIZE_BYTES} bytes)."
             )
 
         p_domain = domain if isinstance(domain, ProductDomain) else ProductDomain(domain)
@@ -106,12 +99,14 @@ async def inspect_product_image(
             generate_certificate
         )
 
-        # Database Persistence
+        # Relational Database Persistence
         if persist_to_db:
             try:
                 annotated_bytes = None
                 if result_dict.get("annotated_image_base64"):
-                    annotated_bytes = base64.b64decode(result_dict["annotated_image_base64"])
+                    # Decode base64 PNG data URL if rendered
+                    b64_data = result_dict["annotated_image_base64"].split(",")[-1]
+                    annotated_bytes = base64.b64decode(b64_data)
                 crud.create_inspection_record(
                     db=db,
                     result_dict=result_dict,
@@ -126,7 +121,7 @@ async def inspect_product_image(
     except HTTPException:
         raise
     except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
     except Exception as e:
         logger.error(f"Inspection pipeline failure: {e}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal inspection error: {str(e)}")
@@ -136,12 +131,13 @@ async def inspect_product_image(
     "/batch",
     response_model=BatchInspectionResponse,
     summary="Batch Inspect Multiple Product Images",
-    description="Processes multiple uploaded product images, persisting results and returning aggregated triage statistics."
+    description="Processes multiple uploaded product images under bounded concurrency with partial failure resilience."
 )
 async def batch_inspect_images(
     files: List[UploadFile] = File(..., description="List of product image files to inspect"),
     domain: ProductDomain = Query(ProductDomain.GLASS_BOTTLE, description="Target product domain"),
     persist_to_db: bool = Query(True, description="Persist results to database"),
+    client_role: Role = Depends(require_operator),
     service: InspectionService = Depends(get_inspection_service),
     db: Session = Depends(get_db)
 ):
@@ -150,7 +146,7 @@ async def batch_inspect_images(
     if len(files) > settings.MAX_BATCH_FILES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Batch size ({len(files)}) exceeds maximum limit of {settings.MAX_BATCH_FILES} files."
+            detail=f"Batch size ({len(files)}) exceeds maximum limit of {settings.MAX_BATCH_FILES} files per request."
         )
 
     batch_id = f"BATCH-{uuid.uuid4().hex[:8].upper()}"
@@ -162,23 +158,33 @@ async def batch_inspect_images(
 
     p_domain = domain if isinstance(domain, ProductDomain) else ProductDomain(domain)
 
+    # Process items with bounded concurrency semaphore and partial failure handling
     for f in files:
         fname = f.filename or "unknown.png"
         try:
             content = await f.read()
             if len(content) == 0:
-                results.append(BatchInspectionItem(filename=fname, status="error", error_message="Empty file."))
+                results.append(BatchInspectionItem(filename=fname, status="error", error_message="Empty file upload."))
+                continue
+            if len(content) > settings.MAX_UPLOAD_SIZE_BYTES:
+                results.append(BatchInspectionItem(
+                    filename=fname,
+                    status="error",
+                    error_message=f"File exceeds maximum upload size of {settings.MAX_UPLOAD_SIZE_BYTES} bytes."
+                ))
                 continue
 
-            result_dict = await anyio.to_thread.run_sync(
-                service.inspect_image,
-                content,
-                p_domain,
-                False,  # Skip visual rendering for throughput
-                False,
-                True,
-                True
-            )
+            # Bounded concurrency wrapper
+            async with _BATCH_CAPACITY_LIMITER:
+                result_dict = await anyio.to_thread.run_sync(
+                    service.inspect_image,
+                    content,
+                    p_domain,
+                    False,  # Skip HUD rendering for high-throughput batching
+                    False,
+                    True,
+                    True
+                )
 
             verdict = result_dict.get("verdict", {})
             cert = result_dict.get("certificate", {})
@@ -222,7 +228,7 @@ async def batch_inspect_images(
             ))
 
         except Exception as err:
-            logger.error(f"Batch item {fname} failed: {err}")
+            logger.error(f"Batch item '{fname}' failed during inspection: {err}")
             results.append(BatchInspectionItem(filename=fname, status="error", error_message=str(err)))
 
     successes = sum(1 for r in results if r.status == "success")
@@ -247,7 +253,10 @@ async def batch_inspect_images(
     response_model=ThresholdResponse,
     summary="Get Operational Quality Thresholds"
 )
-def get_operational_thresholds(service: InspectionService = Depends(get_inspection_service)):
+def get_operational_thresholds(
+    client_role: Role = Depends(require_auditor),
+    service: InspectionService = Depends(get_inspection_service)
+):
     t = service.thresholds
     return ThresholdResponse(
         anomaly_threshold=t.anomaly_threshold,
@@ -264,15 +273,15 @@ def get_operational_thresholds(service: InspectionService = Depends(get_inspecti
 @router.put(
     "/thresholds",
     response_model=ThresholdResponse,
-    summary="Update Operational Quality Thresholds"
+    summary="Update Operational Quality Thresholds (Admin Only)"
 )
 def update_operational_thresholds(
     request: ThresholdUpdateRequest,
-    actor: str = Depends(verify_admin_authorization),
+    client_role: Role = Depends(require_admin),
     service: InspectionService = Depends(get_inspection_service)
 ):
     updates = request.model_dump(exclude_unset=True)
-    updated = service.update_thresholds(updates, actor=actor)
+    updated = service.update_thresholds(updates, actor=f"admin_{client_role.value}")
     return ThresholdResponse(
         anomaly_threshold=updated.anomaly_threshold,
         anomaly_margin=updated.anomaly_margin,
@@ -290,7 +299,10 @@ def update_operational_thresholds(
     response_model=CalibrationResponse,
     summary="Get Camera Calibration Parameters"
 )
-def get_camera_calibration(service: InspectionService = Depends(get_inspection_service)):
+def get_camera_calibration(
+    client_role: Role = Depends(require_auditor),
+    service: InspectionService = Depends(get_inspection_service)
+):
     cal = service.calibrator
     has_cam = cal.config.camera_matrix is not None if cal.config else False
     has_dist = cal.config.dist_coeffs is not None if cal.config else False
@@ -306,14 +318,14 @@ def get_camera_calibration(service: InspectionService = Depends(get_inspection_s
 @router.put(
     "/calibration",
     response_model=CalibrationResponse,
-    summary="Update Camera Calibration Scale"
+    summary="Update Camera Calibration Scale (Admin Only)"
 )
 def update_camera_calibration(
     request: CalibrationUpdateRequest,
-    actor: str = Depends(verify_admin_authorization),
+    client_role: Role = Depends(require_admin),
     service: InspectionService = Depends(get_inspection_service)
 ):
-    cal = service.update_calibration(request.mm_per_pixel, actor=actor)
+    cal = service.update_calibration(request.mm_per_pixel, actor=f"admin_{client_role.value}")
     has_cam = cal.config.camera_matrix is not None if cal.config else False
     has_dist = cal.config.dist_coeffs is not None if cal.config else False
     return CalibrationResponse(
@@ -330,7 +342,10 @@ def update_camera_calibration(
     response_model=List[AuditLogEntrySchema],
     summary="Get Configuration Change Audit Trail"
 )
-def get_audit_log(service: InspectionService = Depends(get_inspection_service)):
+def get_audit_log(
+    client_role: Role = Depends(require_auditor),
+    service: InspectionService = Depends(get_inspection_service)
+):
     return service.audit_log
 
 

@@ -1,6 +1,6 @@
 """
 Pydantic Schemas for Historical Inspection Queries, Quality Analytics,
-Batch Inspection, and Model Registry.
+Batch Inspection, Archival Retention, and Model Registry.
 """
 
 from typing import Any, Dict, List, Optional
@@ -25,6 +25,8 @@ class InspectionSummaryItem(BaseModel):
     early_exit_applied: bool
     num_defect_components: int
     has_images: bool = False
+    key_id: Optional[str] = "KEY-2026-V1"
+    record_status: str = "ACTIVE"
 
 
 class PaginatedInspectionsResponse(BaseModel):
@@ -41,12 +43,25 @@ class VerificationResponse(BaseModel):
     is_valid: bool
     inspection_id: int
     certificate_id: str
+    key_id: Optional[str] = "KEY-2026-V1"
     sha256_integrity_match: bool
     hmac_signature_match: bool
     stored_hash: str
     computed_hash: str
     stored_signature: str
     computed_signature: str
+    record_status: Optional[str] = "ACTIVE"
+    detail: Optional[str] = None
+
+
+class LatencyPercentilesSchema(BaseModel):
+    """Statistical latency percentiles across historical inspection runs."""
+    mean_ms: float
+    median_p50_ms: float
+    p95_ms: float
+    p99_ms: float
+    min_ms: float
+    max_ms: float
 
 
 class AnalyticsSummaryResponse(BaseModel):
@@ -56,10 +71,13 @@ class AnalyticsSummaryResponse(BaseModel):
     review_count: int
     fail_count: int
     pass_rate_pct: float
+    review_rate_pct: float = 0.0
+    fail_rate_pct: float = 0.0
     early_exit_count: int
     early_exit_rate_pct: float
     mean_anomaly_score: float
     mean_latency_ms: float
+    latency_metrics: Optional[LatencyPercentilesSchema] = None
     defect_type_distribution: Dict[str, int] = Field(default_factory=dict)
     morphology_distribution: Dict[str, int] = Field(default_factory=dict)
     spatial_zone_distribution: Dict[str, int] = Field(default_factory=dict)
@@ -93,6 +111,22 @@ class BatchInspectionResponse(BaseModel):
     results: List[BatchInspectionItem]
 
 
+class ArchiveRequest(BaseModel):
+    """Request payload to soft archive an inspection record with compliance justification."""
+    reason: str = Field(..., min_length=5, max_length=255, description="Auditor justification for status change")
+    status: Optional[str] = Field("ARCHIVED", pattern="^(ARCHIVED|LEGAL_HOLD)$", description="Target retention status")
+
+
+class ArchiveResponse(BaseModel):
+    """Confirmation payload for inspection record archival."""
+    inspection_id: int
+    certificate_id: str
+    record_status: str
+    archived_at: str
+    archived_by: str
+    archive_reason: str
+
+
 class ModelRegistryItem(BaseModel):
     """Metadata for an individual machine learning inspection model."""
     tier: str
@@ -109,4 +143,3 @@ class ModelRegistryResponse(BaseModel):
     service: str
     device: str
     models: List[ModelRegistryItem]
-

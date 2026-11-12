@@ -1,7 +1,8 @@
 """
 Database CRUD Repository Layer for Industrial AOI Inspections.
-Handles relational persistence, file storage, multi-filter historical queries,
-cryptographic record verification, and aggregate analytics calculations.
+Handles relational persistence, relative URI storage, multi-filter historical queries,
+cryptographic record verification with key rotation resolution, soft deletion lifecycles,
+and aggregate analytics calculations.
 """
 
 from datetime import datetime, timezone
@@ -11,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 import hmac
 import hashlib
-
+import numpy as np
 from sqlalchemy import func, desc
 from sqlalchemy.orm import Session
 
@@ -20,6 +21,7 @@ from backend.app.database.models import (
     InspectionRecord,
     DefectComponentRecord,
     AuditLogRecord,
+    utc_now,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,7 +34,7 @@ def create_inspection_record(
     annotated_image_bytes: Optional[bytes] = None,
 ) -> InspectionRecord:
     """
-    Persists an inspection run, stores associated image files,
+    Persists an inspection run, stores associated image files with relative URIs,
     and inserts all child defect components within a single database transaction.
     """
     verdict = result_dict.get("verdict", {})
@@ -41,23 +43,26 @@ def create_inspection_record(
     domain = result_dict.get("product_domain", "GLASS_BOTTLE")
     cert_id = cert.get("certificate_id") or f"CERT-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
 
-    # 1. Media File Storage
-    orig_path_str = None
-    annot_path_str = None
+    # 1. Media File Storage (Decoupled Relative URIs)
+    orig_uri = None
+    annot_uri = None
 
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    target_dir = settings.STORAGE_DIR / domain / date_str
-    target_dir.mkdir(parents=True, exist_ok=True)
+    target_rel_dir = Path(domain) / date_str
+    target_abs_dir = settings.STORAGE_DIR / target_rel_dir
+    target_abs_dir.mkdir(parents=True, exist_ok=True)
 
     if source_image_bytes:
-        orig_file = target_dir / f"{cert_id}_original.jpg"
+        orig_filename = f"{cert_id}_original.jpg"
+        orig_file = target_abs_dir / orig_filename
         orig_file.write_bytes(source_image_bytes)
-        orig_path_str = str(orig_file)
+        orig_uri = str(target_rel_dir / orig_filename).replace("\\", "/")
 
     if annotated_image_bytes:
-        annot_file = target_dir / f"{cert_id}_annotated.jpg"
+        annot_filename = f"{cert_id}_annotated.jpg"
+        annot_file = target_abs_dir / annot_filename
         annot_file.write_bytes(annotated_image_bytes)
-        annot_path_str = str(annot_file)
+        annot_uri = str(target_rel_dir / annot_filename).replace("\\", "/")
 
     # 2. Extract values with robust fallbacks
     zone_summary = cert.get("zone_summary", {})
@@ -78,11 +83,11 @@ def create_inspection_record(
         timestamp_utc=ts_dt,
         timestamp_iso=ts_str,
         product_domain=domain,
-        decision=verdict.get("decision", "PASS"),
-        severity=verdict.get("severity", "NONE"),
-        routing_action=verdict.get("routing", "LINE_CONTINUE"),
-        anomaly_score=float(verdict.get("anomaly_score", 0.0)),
-        primary_defect_type=verdict.get("primary_defect_type", "nominal"),
+        decision=cert.get("decision", verdict.get("decision", "PASS")),
+        severity=cert.get("severity", verdict.get("severity", "NONE")),
+        routing_action=cert.get("routing_action", verdict.get("routing", "LINE_CONTINUE")),
+        anomaly_score=float(cert.get("anomaly_score", verdict.get("anomaly_score", 0.0))),
+        primary_defect_type=cert.get("primary_defect_type", verdict.get("primary_defect_type", "nominal")),
         dominant_morphology=cert.get("dominant_morphology", "NONE"),
         total_defect_area_mm2=float(cert.get("total_defect_area_mm2", verdict.get("physical_defect_area_mm2", 0.0))),
         component_defect_area_mm2=float(cert.get("component_defect_area_mm2", 0.0)),
@@ -92,16 +97,22 @@ def create_inspection_record(
         max_defect_length_mm=float(cert.get("max_defect_length_mm", 0.0)),
         measurement_mode=physical.get("measurement_mode", cert.get("measurement_mode", "projected_sensor_plane")),
         calibration_scale_mm_per_pixel=float(physical.get("mm_per_pixel", cert.get("calibration_scale_mm_per_pixel", 0.15))),
-        engineering_rationale=verdict.get("engineering_rationale", cert.get("engineering_rationale", "")),
+        engineering_rationale=cert.get("engineering_rationale", verdict.get("engineering_rationale", "")),
         config_version=cert.get("config_version", "CFG-v1.0.0"),
         source_image_hash=cert.get("source_image_hash", hashlib.sha256(source_image_bytes or b"").hexdigest()),
+        model_artifact_id=cert.get("model_artifact_id", settings.MODEL_ARTIFACT_ID),
+        software_version=cert.get("software_version", settings.SOFTWARE_VERSION),
+        calibration_profile_id=cert.get("calibration_profile_id", settings.CALIBRATION_PROFILE_ID),
+        decision_policy_version=cert.get("decision_policy_version", settings.DECISION_POLICY_VERSION),
+        key_id=cert.get("key_id", settings.ACTIVE_KEY_ID),
         sha256_integrity_hash=cert.get("sha256_integrity_hash", ""),
         hmac_sha256_signature=cert.get("hmac_sha256_signature", cert.get("sha256_audit_signature", "")),
         total_latency_ms=float(result_dict.get("total_latency_ms", 0.0)),
         early_exit_applied=bool(result_dict.get("early_exit_applied", False)),
-        original_image_path=orig_path_str,
-        annotated_image_path=annot_path_str,
+        original_image_uri=orig_uri,
+        annotated_image_uri=annot_uri,
         zone_summary_json=json.dumps(zone_summary),
+        record_status="ACTIVE",
     )
 
     db.add(record)
@@ -124,9 +135,9 @@ def create_inspection_record(
             bounding_box_json=json.dumps(bbox),
             centroid_xy_json=json.dumps(centroid),
             aspect_ratio=float(comp.get("aspect_ratio", 1.0)),
-            circularity=float(comp.get("circularity", 0.0)),
+            circularity=float(min(1.0, max(0.0, comp.get("circularity", 0.0)))),
             is_shape_reliable=bool(comp.get("is_shape_reliable", True)),
-            solidity=float(comp.get("solidity", 1.0)),
+            solidity=float(min(1.0, max(0.0, comp.get("solidity", 1.0)))),
             compactness=float(comp.get("compactness", 1.0)),
             extent=float(comp.get("extent", 1.0)),
             equivalent_diameter_mm=float(comp.get("equivalent_diameter_mm", 0.0)),
@@ -163,9 +174,19 @@ def list_inspections(
     defect_type: Optional[str] = None,
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
+    include_archived: bool = False,
+    record_status: Optional[str] = None,
 ) -> Tuple[List[InspectionRecord], int]:
-    """Queries inspection history with multi-parameter filtering and pagination."""
+    """
+    Queries inspection history with multi-parameter filtering and pagination.
+    Defaults to returning ACTIVE records only unless include_archived is True.
+    """
     query = db.query(InspectionRecord)
+
+    if record_status:
+        query = query.filter(InspectionRecord.record_status == record_status)
+    elif not include_archived:
+        query = query.filter(InspectionRecord.record_status == "ACTIVE")
 
     if domain:
         query = query.filter(InspectionRecord.product_domain == domain)
@@ -185,13 +206,64 @@ def list_inspections(
     return records, total_count
 
 
+def archive_inspection_record(
+    db: Session,
+    inspection_id: int,
+    actor: str,
+    reason: str,
+    new_status: str = "ARCHIVED",
+) -> Optional[InspectionRecord]:
+    """
+    Performs soft archival of an inspection record, preserving permanent historical auditability.
+    Transitions status to ARCHIVED or LEGAL_HOLD and logs the action immutably.
+    """
+    rec = db.query(InspectionRecord).filter(InspectionRecord.id == inspection_id).first()
+    if not rec:
+        return None
+
+    prev_status = rec.record_status
+    rec.record_status = new_status
+    rec.archived_at = utc_now()
+    rec.archived_by = actor
+    rec.archive_reason = reason
+
+    # Record permanent audit trail
+    record_audit_log(
+        db=db,
+        actor=actor,
+        action=f"RECORD_{new_status}",
+        changed_parameters={
+            "inspection_id": inspection_id,
+            "certificate_id": rec.certificate_id,
+            "previous_status": prev_status,
+            "new_status": new_status,
+            "reason": reason,
+        },
+        config_version=rec.config_version,
+    )
+
+    db.commit()
+    db.refresh(rec)
+    return rec
+
+
 def delete_inspection(db: Session, inspection_id: int) -> bool:
-    """Deletes an inspection record, cascaded child components, and stored images."""
+    """
+    Destructive hard deletion.
+    STRICTLY RESTRICTED to development/test environments where settings.ALLOW_HARD_DELETE=True.
+    Raises PermissionError in production to preserve audit trail compliance.
+    """
+    if not settings.ALLOW_HARD_DELETE:
+        raise PermissionError(
+            "Hard deletion is prohibited in compliance audit mode. "
+            "Use archive_inspection_record() for soft retention management."
+        )
+
     rec = db.query(InspectionRecord).filter(InspectionRecord.id == inspection_id).first()
     if not rec:
         return False
 
-    # Clean up files on disk if they exist
+    # Clean up physical files on disk if they exist
     for p in [rec.original_image_path, rec.annotated_image_path]:
         if p and Path(p).exists():
             try:
@@ -208,9 +280,16 @@ def get_analytics_summary(
     db: Session,
     domain: Optional[str] = None,
     start_time: Optional[datetime] = None,
+    include_archived: bool = False,
 ) -> Dict[str, Any]:
-    """Computes aggregate factory KPIs and defect distribution statistics."""
+    """
+    Computes statistical factory KPIs, formal yield breakdowns (PASS, REVIEW, FAIL),
+    and latency percentiles (p50, p95, p99).
+    Excludes ARCHIVED records by default to prevent skewing operational metrics.
+    """
     query = db.query(InspectionRecord)
+    if not include_archived:
+        query = query.filter(InspectionRecord.record_status == "ACTIVE")
     if domain:
         query = query.filter(InspectionRecord.product_domain == domain)
     if start_time:
@@ -224,78 +303,125 @@ def get_analytics_summary(
             "review_count": 0,
             "fail_count": 0,
             "pass_rate_pct": 0.0,
+            "review_rate_pct": 0.0,
+            "fail_rate_pct": 0.0,
             "early_exit_count": 0,
             "early_exit_rate_pct": 0.0,
             "mean_anomaly_score": 0.0,
-            "mean_latency_ms": 0.0,
+            "latency_metrics": {
+                "mean_ms": 0.0,
+                "median_p50_ms": 0.0,
+                "p95_ms": 0.0,
+                "p99_ms": 0.0,
+                "min_ms": 0.0,
+                "max_ms": 0.0,
+            },
             "defect_type_distribution": {},
             "morphology_distribution": {},
             "spatial_zone_distribution": {},
-            "severity_distribution": {}
+            "severity_distribution": {},
         }
 
     # Decision counts
     decisions = db.query(
         InspectionRecord.decision, func.count(InspectionRecord.id)
-    ).group_by(InspectionRecord.decision)
+    )
+    if not include_archived:
+        decisions = decisions.filter(InspectionRecord.record_status == "ACTIVE")
     if domain:
         decisions = decisions.filter(InspectionRecord.product_domain == domain)
     if start_time:
         decisions = decisions.filter(InspectionRecord.timestamp_utc >= start_time)
-    decision_map = dict(decisions.all())
+    decision_map = dict(decisions.group_by(InspectionRecord.decision).all())
 
     pass_count = decision_map.get("PASS", 0)
     review_count = decision_map.get("REVIEW", 0)
     fail_count = decision_map.get("FAIL", 0)
+
+    # Formal statistical factory yield metrics
     pass_rate = round((pass_count / total_inspections) * 100.0, 2)
+    review_rate = round((review_count / total_inspections) * 100.0, 2)
+    fail_rate = round((fail_count / total_inspections) * 100.0, 2)
 
     # Early exit count
     ee_query = query.filter(InspectionRecord.early_exit_applied == True).count()
     ee_rate = round((ee_query / total_inspections) * 100.0, 2)
 
-    # Averages
+    # Anomaly scores
     mean_score = float(query.with_entities(func.avg(InspectionRecord.anomaly_score)).scalar() or 0.0)
-    mean_latency = float(query.with_entities(func.avg(InspectionRecord.total_latency_ms)).scalar() or 0.0)
+
+    # Latency percentiles calculation
+    latencies = [
+        r[0] for r in query.with_entities(InspectionRecord.total_latency_ms).all()
+        if r[0] is not None
+    ]
+    if latencies:
+        lat_arr = np.array(latencies, dtype=np.float64)
+        mean_latency = float(np.mean(lat_arr))
+        p50 = float(np.percentile(lat_arr, 50))
+        p95 = float(np.percentile(lat_arr, 95))
+        p99 = float(np.percentile(lat_arr, 99))
+        min_lat = float(np.min(lat_arr))
+        max_lat = float(np.max(lat_arr))
+    else:
+        mean_latency = p50 = p95 = p99 = min_lat = max_lat = 0.0
+
+    latency_metrics = {
+        "mean_ms": round(mean_latency, 2),
+        "median_p50_ms": round(p50, 2),
+        "p95_ms": round(p95, 2),
+        "p99_ms": round(p99, 2),
+        "min_ms": round(min_lat, 2),
+        "max_ms": round(max_lat, 2),
+    }
 
     # Defect type distribution
     defect_types = db.query(
         InspectionRecord.primary_defect_type, func.count(InspectionRecord.id)
-    ).group_by(InspectionRecord.primary_defect_type)
+    )
+    if not include_archived:
+        defect_types = defect_types.filter(InspectionRecord.record_status == "ACTIVE")
     if domain:
         defect_types = defect_types.filter(InspectionRecord.product_domain == domain)
     if start_time:
         defect_types = defect_types.filter(InspectionRecord.timestamp_utc >= start_time)
-    defect_type_dist = {k: v for k, v in defect_types.all() if k != "nominal"}
+    defect_type_dist = {k: v for k, v in defect_types.group_by(InspectionRecord.primary_defect_type).all() if k != "nominal"}
 
     # Morphology distribution
     morph_query = db.query(
         InspectionRecord.dominant_morphology, func.count(InspectionRecord.id)
-    ).group_by(InspectionRecord.dominant_morphology)
+    )
+    if not include_archived:
+        morph_query = morph_query.filter(InspectionRecord.record_status == "ACTIVE")
     if domain:
         morph_query = morph_query.filter(InspectionRecord.product_domain == domain)
     if start_time:
         morph_query = morph_query.filter(InspectionRecord.timestamp_utc >= start_time)
-    morph_dist = {k: v for k, v in morph_query.all() if k != "NONE"}
+    morph_dist = {k: v for k, v in morph_query.group_by(InspectionRecord.dominant_morphology).all() if k != "NONE"}
 
     # Spatial zone distribution (from defect component records)
     zone_query = db.query(
         DefectComponentRecord.spatial_zone, func.count(DefectComponentRecord.id)
-    ).join(InspectionRecord, DefectComponentRecord.inspection_id == InspectionRecord.id).group_by(DefectComponentRecord.spatial_zone)
+    ).join(InspectionRecord, DefectComponentRecord.inspection_id == InspectionRecord.id)
+    if not include_archived:
+        zone_query = zone_query.filter(InspectionRecord.record_status == "ACTIVE")
     if domain:
         zone_query = zone_query.filter(InspectionRecord.product_domain == domain)
     if start_time:
         zone_query = zone_query.filter(InspectionRecord.timestamp_utc >= start_time)
-    zone_dist = dict(zone_query.all())
+    zone_dist = dict(zone_query.group_by(DefectComponentRecord.spatial_zone).all())
 
     # Severity distribution
     sev_query = db.query(
         InspectionRecord.severity, func.count(InspectionRecord.id)
-    ).group_by(InspectionRecord.severity)
+    )
+    if not include_archived:
+        sev_query = sev_query.filter(InspectionRecord.record_status == "ACTIVE")
     if domain:
         sev_query = sev_query.filter(InspectionRecord.product_domain == domain)
     if start_time:
         sev_query = sev_query.filter(InspectionRecord.timestamp_utc >= start_time)
-    sev_dist = dict(sev_query.all())
+    sev_dist = dict(sev_query.group_by(InspectionRecord.severity).all())
 
     return {
         "total_inspections": total_inspections,
@@ -303,10 +429,13 @@ def get_analytics_summary(
         "review_count": review_count,
         "fail_count": fail_count,
         "pass_rate_pct": pass_rate,
+        "review_rate_pct": review_rate,
+        "fail_rate_pct": fail_rate,
         "early_exit_count": ee_query,
         "early_exit_rate_pct": ee_rate,
         "mean_anomaly_score": round(mean_score, 4),
         "mean_latency_ms": round(mean_latency, 2),
+        "latency_metrics": latency_metrics,
         "defect_type_distribution": defect_type_dist,
         "morphology_distribution": morph_dist,
         "spatial_zone_distribution": zone_dist,
@@ -317,49 +446,38 @@ def get_analytics_summary(
 def verify_stored_record_integrity(
     db: Session,
     inspection_id: int,
-    secret_key: bytes = settings.DEFAULT_HMAC_SECRET,
+    secret_key: Optional[bytes] = None,
 ) -> Dict[str, Any]:
     """
     Cryptographically verifies the authenticity and tamper-evidence of a stored inspection record
-    by recomputing its canonical payload SHA-256 integrity hash and HMAC-SHA256 signature.
+    by resolving the appropriate key_id from the key registry and recomputing its canonical payload HMAC.
     """
     rec = db.query(InspectionRecord).filter(InspectionRecord.id == inspection_id).first()
     if not rec:
         return {"is_valid": False, "detail": "Inspection record not found."}
 
-    # Reconstruct canonical certificate payload
-    components_list = [comp.to_canonical_dict() for comp in rec.components]
-    zone_summary = json.loads(rec.zone_summary_json) if rec.zone_summary_json else {}
+    # Resolve signing key for key rotation resilience
+    signing_key = secret_key
+    if signing_key is None:
+        rec_key_id = rec.key_id or "KEY-2026-V1"
+        if rec_key_id in settings.KEY_REGISTRY:
+            signing_key = settings.KEY_REGISTRY[rec_key_id]
+        elif rec_key_id == settings.ACTIVE_KEY_ID:
+            signing_key = settings.DEFAULT_HMAC_SECRET
+        else:
+            return {
+                "is_valid": False,
+                "inspection_id": rec.id,
+                "certificate_id": rec.certificate_id,
+                "key_id": rec_key_id,
+                "detail": f"Signing key identifier '{rec_key_id}' not found in active key registry. Cannot verify without corresponding secret.",
+            }
 
-    canonical_payload = {
-        "certificate_id": rec.certificate_id,
-        "timestamp_utc": rec.timestamp_iso or rec.timestamp_utc.isoformat(),
-        "product_domain": rec.product_domain,
-        "config_version": rec.config_version,
-        "source_image_hash": rec.source_image_hash,
-        "decision": rec.decision,
-        "severity": rec.severity,
-        "routing_action": rec.routing_action,
-        "anomaly_score": round(rec.anomaly_score, 4),
-        "primary_defect_type": rec.primary_defect_type,
-        "dominant_morphology": rec.dominant_morphology,
-        "total_defect_area_mm2": round(rec.total_defect_area_mm2, 3),
-        "component_defect_area_mm2": round(rec.component_defect_area_mm2, 3),
-        "filtered_noise_area_mm2": round(rec.filtered_noise_area_mm2, 3),
-        "is_area_reconciled": rec.is_area_reconciled,
-        "max_single_defect_area_mm2": round(rec.max_single_defect_area_mm2, 3),
-        "max_defect_length_mm": round(rec.max_defect_length_mm, 3),
-        "measurement_mode": rec.measurement_mode,
-        "num_defect_components": len(components_list),
-        "zone_summary": zone_summary,
-        "defect_components": components_list,
-        "engineering_rationale": rec.engineering_rationale,
-        "calibration_scale_mm_per_pixel": round(rec.calibration_scale_mm_per_pixel, 5),
-    }
-
+    canonical_payload = rec.to_canonical_dict()
     canonical_bytes = json.dumps(canonical_payload, sort_keys=True).encode("utf-8")
+
     computed_hash = hashlib.sha256(canonical_bytes).hexdigest()
-    computed_sig = hmac.new(secret_key, canonical_bytes, hashlib.sha256).hexdigest()
+    computed_sig = hmac.new(signing_key, canonical_bytes, hashlib.sha256).hexdigest()
 
     is_hash_match = hmac.compare_digest(rec.sha256_integrity_hash, computed_hash)
     is_sig_match = hmac.compare_digest(rec.hmac_sha256_signature, computed_sig)
@@ -370,12 +488,14 @@ def verify_stored_record_integrity(
         "is_valid": is_valid,
         "inspection_id": rec.id,
         "certificate_id": rec.certificate_id,
+        "key_id": rec.key_id,
         "sha256_integrity_match": is_hash_match,
         "hmac_signature_match": is_sig_match,
         "stored_hash": rec.sha256_integrity_hash,
         "computed_hash": computed_hash,
         "stored_signature": rec.hmac_sha256_signature,
         "computed_signature": computed_sig,
+        "record_status": rec.record_status,
     }
 
 
@@ -386,7 +506,7 @@ def record_audit_log(
     changed_parameters: Dict[str, Any],
     config_version: str,
 ) -> AuditLogRecord:
-    """Inserts an immutable audit record for configuration updates."""
+    """Inserts an immutable audit record for configuration updates and lifecycle events."""
     log_rec = AuditLogRecord(
         timestamp_utc=datetime.now(timezone.utc),
         actor=actor,

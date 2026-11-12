@@ -1,5 +1,7 @@
 """
 Historical Inspection Records and Cryptographic Audit Verification Endpoints.
+Provides multi-criteria search, certificate exports, key-rotation-resilient HMAC verification,
+and soft archival retention controls.
 """
 
 from datetime import datetime
@@ -10,10 +12,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from backend.app.api.routes.inspection import verify_admin_authorization
+from backend.app.core.config import settings
+from backend.app.core.security import Role, require_admin, require_auditor
 from backend.app.database.connection import get_db
 from backend.app.database import crud
 from backend.app.schemas.history import (
+    ArchiveRequest,
+    ArchiveResponse,
     InspectionSummaryItem,
     PaginatedInspectionsResponse,
     VerificationResponse,
@@ -34,12 +39,16 @@ def list_inspections(
     decision: Optional[str] = Query(None, description="Filter by triage decision: PASS, REVIEW, or FAIL"),
     severity: Optional[str] = Query(None, description="Filter by severity: NONE, LOW, MEDIUM, or CRITICAL"),
     defect_type: Optional[str] = Query(None, description="Filter by defect type: nominal, broken_large, etc."),
+    record_status: Optional[str] = Query(None, description="Filter by retention status: ACTIVE, ARCHIVED, or LEGAL_HOLD"),
+    include_archived: bool = Query(False, description="Include soft-archived and legal hold records"),
     start_date: Optional[datetime] = Query(None, description="Filter inspections on or after this UTC timestamp"),
     end_date: Optional[datetime] = Query(None, description="Filter inspections on or before this UTC timestamp"),
+    client_role: Role = Depends(require_auditor),
     db: Session = Depends(get_db),
 ):
     """
     Retrieves a paginated list of historical inspection records with multi-criteria filtering.
+    Restricted to Auditor and Administrator roles.
     """
     records, total = crud.list_inspections(
         db,
@@ -51,6 +60,8 @@ def list_inspections(
         defect_type=defect_type,
         start_time=start_date,
         end_time=end_date,
+        include_archived=include_archived,
+        record_status=record_status,
     )
 
     items = []
@@ -73,6 +84,8 @@ def list_inspections(
                 early_exit_applied=r.early_exit_applied,
                 num_defect_components=len(r.components),
                 has_images=bool(r.original_image_path or r.annotated_image_path),
+                key_id=r.key_id,
+                record_status=r.record_status,
             )
         )
 
@@ -94,6 +107,7 @@ def list_inspections(
 )
 def get_inspection_detail(
     inspection_id: str,
+    client_role: Role = Depends(require_auditor),
     db: Session = Depends(get_db),
 ):
     """
@@ -116,6 +130,7 @@ def get_inspection_detail(
 def export_certificate(
     inspection_id: str,
     format: str = Query("json", pattern="^(json|markdown)$", description="Export format: json or markdown"),
+    client_role: Role = Depends(require_auditor),
     db: Session = Depends(get_db),
 ):
     """
@@ -130,7 +145,7 @@ def export_certificate(
 
     cert_data = {
         "certificate_id": rec.certificate_id,
-        "timestamp_utc": rec.timestamp_utc.isoformat(),
+        "timestamp_utc": rec.timestamp_iso or rec.timestamp_utc.isoformat(),
         "product_domain": rec.product_domain,
         "config_version": rec.config_version,
         "source_image_hash": rec.source_image_hash,
@@ -150,8 +165,13 @@ def export_certificate(
         "num_defect_components": len(rec.components),
         "zone_summary": json.loads(rec.zone_summary_json) if rec.zone_summary_json else {},
         "defect_components": [comp.to_dict() for comp in rec.components],
-        "engineering_rationale": rec.engineering_rationale,
+        "engineering_rationale": rec.engineering_rationale or "",
         "calibration_scale_mm_per_pixel": round(rec.calibration_scale_mm_per_pixel, 5),
+        "key_id": rec.key_id,
+        "model_artifact_id": rec.model_artifact_id,
+        "software_version": rec.software_version,
+        "calibration_profile_id": rec.calibration_profile_id,
+        "decision_policy_version": rec.decision_policy_version,
         "sha256_integrity_hash": rec.sha256_integrity_hash,
         "hmac_sha256_signature": rec.hmac_sha256_signature,
         "sha256_audit_signature": rec.hmac_sha256_signature,
@@ -174,11 +194,13 @@ def export_certificate(
 )
 def verify_record_integrity(
     inspection_id: int,
+    client_role: Role = Depends(require_auditor),
     db: Session = Depends(get_db),
 ):
     """
     Recomputes the HMAC-SHA256 signature and SHA-256 integrity hash directly from stored database rows
     and verifies that the database records have not been tampered with or corrupted.
+    Resolves historical secret keys via the active key registry.
     """
     res = crud.verify_stored_record_integrity(db, inspection_id)
     if "is_valid" not in res or not res.get("stored_signature"):
@@ -189,6 +211,71 @@ def verify_record_integrity(
     return VerificationResponse(**res)
 
 
+@router.post(
+    "/inspections/{inspection_id}/archive",
+    response_model=ArchiveResponse,
+    summary="Archive Inspection Record (Admin Only)"
+)
+def archive_inspection(
+    inspection_id: int,
+    request: ArchiveRequest,
+    client_role: Role = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Soft archives an inspection record to preserve regulatory compliance history.
+    Transitions status to ARCHIVED or LEGAL_HOLD and logs the actor and reason immutably.
+    """
+    archived_rec = crud.archive_inspection_record(
+        db=db,
+        inspection_id=inspection_id,
+        actor=f"admin_{client_role.value}",
+        reason=request.reason,
+        new_status=request.status or "ARCHIVED",
+    )
+    if not archived_rec:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Inspection record '{inspection_id}' not found.")
+
+    return ArchiveResponse(
+        inspection_id=archived_rec.id,
+        certificate_id=archived_rec.certificate_id,
+        record_status=archived_rec.record_status,
+        archived_at=archived_rec.archived_at.isoformat() if archived_rec.archived_at else "",
+        archived_by=archived_rec.archived_by or "",
+        archive_reason=archived_rec.archive_reason or "",
+    )
+
+
+@router.delete(
+    "/inspections/{inspection_id}",
+    summary="Delete Inspection Record (Restricted)"
+)
+def delete_inspection(
+    inspection_id: int,
+    client_role: Role = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """
+    Deletes an inspection record and stored media.
+    By default in production compliance mode, hard deletion is prohibited (returns 405 Method Not Allowed).
+    To manage records, use POST /inspections/{id}/archive.
+    Hard deletion is only permitted when settings.ALLOW_HARD_DELETE=True (dev/test environments).
+    """
+    if not settings.ALLOW_HARD_DELETE:
+        raise HTTPException(
+            status_code=status.HTTP_405_METHOD_NOT_ALLOWED,
+            detail="Hard deletion is prohibited to preserve permanent compliance audit records. Use POST /inspections/{id}/archive to soft-archive records."
+        )
+
+    try:
+        deleted = crud.delete_inspection(db, inspection_id)
+        if not deleted:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inspection record not found.")
+        return {"status": "success", "message": f"Inspection record {inspection_id} deleted successfully."}
+    except PermissionError as pe:
+        raise HTTPException(status_code=status.HTTP_405_METHOD_NOT_ALLOWED, detail=str(pe))
+
+
 @router.get(
     "/inspections/{inspection_id}/image",
     summary="Retrieve Stored Inspection Image"
@@ -196,6 +283,7 @@ def verify_record_integrity(
 def get_inspection_image(
     inspection_id: str,
     image_type: str = Query("annotated", pattern="^(original|annotated)$", description="Image type to retrieve"),
+    client_role: Role = Depends(require_auditor),
     db: Session = Depends(get_db),
 ):
     """
@@ -213,22 +301,3 @@ def get_inspection_image(
         )
 
     return FileResponse(target_path, media_type="image/jpeg")
-
-
-@router.delete(
-    "/inspections/{inspection_id}",
-    summary="Delete Inspection Record (Admin Only)"
-)
-def delete_inspection(
-    inspection_id: int,
-    db: Session = Depends(get_db),
-    authorized: bool = Depends(verify_admin_authorization),
-):
-    """
-    Deletes an inspection record, cascaded child components, and stored images.
-    Protected by admin API key.
-    """
-    deleted = crud.delete_inspection(db, inspection_id)
-    if not deleted:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inspection record not found.")
-    return {"status": "success", "message": f"Inspection record {inspection_id} deleted successfully."}
