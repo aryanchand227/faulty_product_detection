@@ -34,3 +34,4 @@ The segmented binary mask directly feeds the downstream `DefectMorphologyAnalyze
 
 ## Surface Geometry Caution
 Reported areas represent projected sensor plane damage. For non-planar surfaces (e.g., cylindrical bottles), true 3D surface area requires trigonometric surface curvature compensation.
+

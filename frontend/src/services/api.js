@@ -7,7 +7,7 @@ const API_BASE = "/api/v1";
 
 class ApiService {
   constructor() {
-    this.apiKey = localStorage.getItem("aoi_api_key") || "aoi-operator-secret-key-2026";
+    this.apiKey = localStorage.getItem("aoi_api_key") || "aoi-admin-secret-key-2026";
   }
 
   setApiKey(key) {

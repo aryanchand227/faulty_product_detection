@@ -31,3 +31,4 @@ pipeline_tag: object-detection
 ## Calibration and Coordinate Mapping
 - Bounding boxes $[bx, by, bw, bh]$ are mapped to physical metric dimensions using the calibrated camera scale ($s = 0.15\text{ mm/pixel}$).
 - **Planar Limitation:** Physical dimensions derived from bounding boxes assume a flat target surface perpendicular to the optical axis.
+

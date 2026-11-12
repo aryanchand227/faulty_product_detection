@@ -246,3 +246,4 @@ industrial-damage-detection/
 - **Author:** Aryan Chand ([@aryanchand227](https://github.com/aryanchand227))
 - **Hugging Face Hub:** [TAC13](https://huggingface.co/TAC13)
 - **License:** MIT License. See `LICENSE` for details.
+
