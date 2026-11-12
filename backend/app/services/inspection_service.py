@@ -188,19 +188,23 @@ class InspectionService:
 
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
+        import gc
+        import torch
+
         # Thread-safe snapshot: Capture active configuration version for this inspection execution
         with self._lock:
             active_cfg_version = self.config_version
             # Set domain for active run
             self.inspector.domain = domain
 
-        result: UnifiedInspectionResult = self.inspector.inspect(
-            image_input=img_rgb,
-            render_visuals=render_visuals,
-            force_full_pipeline=force_full_pipeline,
-            extract_morphology=extract_morphology,
-            generate_certificate=generate_certificate
-        )
+        with torch.inference_mode():
+            result: UnifiedInspectionResult = self.inspector.inspect(
+                image_input=img_rgb,
+                render_visuals=render_visuals,
+                force_full_pipeline=force_full_pipeline,
+                extract_morphology=extract_morphology,
+                generate_certificate=generate_certificate
+            )
 
         res_dict = result.to_dict()
 
@@ -208,16 +212,21 @@ class InspectionService:
         if res_dict.get("certificate"):
             res_dict["certificate"]["config_version"] = active_cfg_version
 
-        # Encode annotated visual overlay to Base64 PNG if rendered
+        # Encode annotated visual overlay to Base64 JPEG if rendered (compact 640px to bound memory)
         if result.annotated_image is not None and render_visuals:
             annotated_bgr = cv2.cvtColor(result.annotated_image, cv2.COLOR_RGB2BGR)
-            success, encoded_img = cv2.imencode(".png", annotated_bgr)
+            h, w = annotated_bgr.shape[:2]
+            if max(h, w) > 640:
+                scale = 640.0 / max(h, w)
+                annotated_bgr = cv2.resize(annotated_bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+            success, encoded_img = cv2.imencode(".jpg", annotated_bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
             if success:
                 b64_str = base64.b64encode(encoded_img.tobytes()).decode("utf-8")
-                res_dict["annotated_image_base64"] = f"data:image/png;base64,{b64_str}"
+                res_dict["annotated_image_base64"] = f"data:image/jpeg;base64,{b64_str}"
             else:
                 res_dict["annotated_image_base64"] = None
         else:
             res_dict["annotated_image_base64"] = None
 
+        gc.collect()
         return res_dict

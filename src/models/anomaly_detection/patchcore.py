@@ -311,7 +311,7 @@ class PatchCore:
     def predict_patches(
         self,
         images: torch.Tensor,
-        chunk_size: int = 256,
+        chunk_size: int = 64,
         score_method: str = "max",
         top_k: int = 5
     ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, int]]:
