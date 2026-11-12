@@ -9,6 +9,13 @@
 
 An enterprise-grade, modular, cryptographically auditable **Automated Optical Inspection (AOI)** microservice for high-speed industrial manufacturing lines. The system integrates deep anomaly detection, defect classification, bounding box localization, pixel-level contour segmentation, 2D morphological analysis, functional spatial zoning, camera geometric calibration, and HMAC-SHA256 signed compliance certificates.
 
+### 🚀 Instant 1-Click Cloud Deployment
+
+| Cloud Platform | Role | 1-Click Deploy Link |
+| :--- | :--- | :--- |
+| **Render** *(Full Microservice + UI)* | Docker Container (FastAPI, PyTorch, SQLite/PostgreSQL, Web UI) | [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/aryanchand227/faulty_product_detection) |
+| **Vercel** *(Frontend Dashboard)* | Static UI Client (Connects to backend via `aoi_api_base`) | [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Faryanchand227%2Ffaulty_product_detection&project-name=faulty-product-inspection&repository-name=faulty-product-inspection) |
+
 ---
 
 ## 1. System Architecture

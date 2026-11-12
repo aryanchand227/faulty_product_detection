@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: industrial-damage-detection
+    env: docker
+    dockerfilePath: Dockerfile
+    plan: free
+    region: oregon
+    branch: master
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: ENVIRONMENT
+        value: production
+      - key: AOI_ADMIN_API_KEY
+        value: aoi-admin-secret-key-2026
+      - key: AOI_OPERATOR_API_KEY
+        value: aoi-operator-secret-key-2026
+      - key: AOI_AUDITOR_API_KEY
+        value: aoi-auditor-secret-key-2026
+      - key: AOI_HMAC_SECRET_KEY
+        value: aoi-production-secret-key-2026-compliance

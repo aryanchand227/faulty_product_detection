@@ -3,11 +3,20 @@
  * Wraps all FastAPI v1 endpoints with error handling and authentication header injection.
  */
 
-const API_BASE = "/api/v1";
+let API_BASE = window.__AOI_API_BASE__ || localStorage.getItem("aoi_api_base") || "/api/v1";
 
 class ApiService {
   constructor() {
     this.apiKey = localStorage.getItem("aoi_api_key") || "aoi-admin-secret-key-2026";
+  }
+
+  get apiBase() {
+    return API_BASE;
+  }
+
+  setApiBase(base) {
+    API_BASE = base;
+    localStorage.setItem("aoi_api_base", base);
   }
 
   setApiKey(key) {
