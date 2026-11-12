@@ -20,8 +20,8 @@ This register explicitly separates independent system engineering from external 
 | **UAR-003** | Phase 4 | Optional: Fine-Tune Steel ResNet Classifier | **NOT REQUIRED** | Fallback ResNet-18 weights and heuristic classifier inference are implemented and fully functional locally. Standalone Colab notebook `training/colab/classification/03_train_classification_models.ipynb` is prepared if custom retraining is desired. |
 | **UAR-004** | Phase 5 | Optional: Fine-Tune Steel YOLOv8n Detector | **NOT REQUIRED** | Pre-trained YOLOv8n weights (`yolov8n.pt`) and bounding box inference are operational. Standalone Colab notebook `training/colab/detection/05_train_yolo.ipynb` is ready. |
 | **UAR-005** | Phase 6 | Optional: Fine-Tune Steel U-Net Segmenter | **NOT REQUIRED** | Lightweight U-Net architecture, forward/backward passes, and synthetic inference are tested locally. Standalone Colab notebook `training/colab/segmentation/06_train_unet.ipynb` is ready. |
-| **UAR-006** | Phase 17 | Docker Hub Image Push (Optional) | **READY FOR USER** | Container configurations and Dockerfile are provided. Local build and execution can run directly via Docker Compose. |
-| **UAR-007** | Phase 18 | Final GitHub Remote Push | **READY FOR USER** | Remote origin is configured to `https://github.com/aryanchand227/faulty_product_detection.git`. Final push requires user's Git push credentials. |
+| **UAR-006** | Phase 17 | Cloud Container Deployment (Render & Vercel) | **VERIFIED** | Live multi-tier inspection microservice active on Render (`https://industrial-damage-detection.onrender.com`) and edge frontend active on Vercel (`https://frontend-five-mocha-98.vercel.app`). |
+| **UAR-007** | Phase 18 | Final GitHub Remote Push | **VERIFIED** | Master branch synchronized with `https://github.com/aryanchand227/faulty_product_detection.git`. |
 
 ---
 
