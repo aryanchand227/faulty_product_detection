@@ -46,13 +46,44 @@ class InspectionService:
         if inspector is not None:
             self.inspector = inspector
         else:
+            t1_inferencer = self._load_tier1_inferencer()
             self.inspector = UnifiedQualityInspector(
                 domain=ProductDomain.GLASS_BOTTLE,
+                tier1_inferencer=t1_inferencer,
                 calibrator=self.calibrator,
                 decision_engine=self.decision_engine,
                 early_exit=True,
                 device=self.device
             )
+
+    def _load_tier1_inferencer(self):
+        """Loads PatchCore with Wide-ResNet-50-2 memory bank from Hugging Face Hub or local cache."""
+        try:
+            import os
+            import torch
+            from huggingface_hub import hf_hub_download
+            from src.models.anomaly_detection.patchcore import PatchCore
+            from src.inference.anomaly_inference import PatchCoreInferencer
+            from backend.app.core.config import settings
+
+            hf_token = os.getenv("HF_TOKEN")
+            logger.info(f"Loading Tier 1 PatchCore weights from Hugging Face Hub ({settings.HF_REPO_ID})...")
+            ckpt_path = hf_hub_download(
+                repo_id=settings.HF_REPO_ID,
+                filename="checkpoints/patchcore_bottle_wide_resnet50_2.pt",
+                token=hf_token
+            )
+            ckpt = torch.load(ckpt_path, map_location=self.device)
+            model = PatchCore(backbone_name="wide_resnet50_2", coreset_ratio=0.10, device=self.device)
+            model.memory_bank = ckpt["memory_bank"].to(self.device)
+            model.threshold = float(ckpt.get("threshold_oracle", 15.50))
+            model.backbone.eval()
+            logger.info(f"Successfully loaded PatchCore memory bank {model.memory_bank.shape} from {ckpt_path}")
+            return PatchCoreInferencer(patchcore_instance=model, device=self.device)
+        except Exception as e:
+            logger.warning(f"Could not load Hugging Face PatchCore weights: {e}. Falling back to default.")
+            from src.inference.anomaly_inference import PatchCoreInferencer
+            return PatchCoreInferencer(device=self.device)
 
     @property
     def config_version(self) -> str:
